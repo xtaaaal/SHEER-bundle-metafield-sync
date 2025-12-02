@@ -125,6 +125,41 @@ export default async function handler(req, res) {
   }
 
   try {
+    // Handle different webhook types
+    const shopDomain = process.env.SHOPIFY_SHOP_DOMAIN;
+    const apiToken = process.env.SHOPIFY_API_TOKEN;
+    const apiVersion = '2025-10';
+    
+    // Check if this is a product update webhook
+    // Product update webhook payload: { id, title, variants: [{ price, ... }], ... }
+    if (body.variants && Array.isArray(body.variants) && body.variants.length > 0) {
+      // This is a product update webhook
+      const productId = body.id;
+      const productTitle = body.title;
+      const productPrice = parseFloat(body.variants[0]?.price) || null; // Price in dollars
+      
+      if (!productId || !productPrice) {
+        console.log('Product update webhook received but missing product ID or price. Body keys:', Object.keys(body));
+        return res.status(200).json({ success: true, message: 'Product update webhook received but missing data' });
+      }
+
+      console.log('Product updated webhook received:', {
+        id: productId,
+        title: productTitle,
+        price: productPrice
+      });
+      
+      // Sync product price to bundle collections
+      await syncProductPriceToBundleCollections(productId, productPrice, shopDomain, apiToken, apiVersion);
+      
+      return res.status(200).json({ 
+        success: true, 
+        message: 'Product price synced to bundle collections',
+        product_id: productId,
+        product_price: productPrice
+      });
+    }
+    
     // Handle "Collection updated" webhook
     // Note: Shopify doesn't have "Collection metafield updated" event
     // We use "Collection updated" and check if bundle metafields need processing
@@ -138,7 +173,7 @@ export default async function handler(req, res) {
     if (!collectionId) {
       console.log('Webhook received but no collection ID found. Body keys:', Object.keys(body));
       // This might be a different webhook type, ignore it
-      return res.status(200).json({ success: true, message: 'Not a collection update webhook' });
+      return res.status(200).json({ success: true, message: 'Not a collection or product update webhook' });
     }
 
     console.log('Collection updated webhook received:', {
@@ -290,15 +325,248 @@ async function getCollectionBundleData(collectionId, shopDomain, apiToken, apiVe
     const bundleGroupIdMetafield = collection.bundleGroupId;
     const productPriceMetafield = collection.bundleProductPrice;
     
+    // Debug: Log metafield data
+    console.log('Product price metafield raw data:', {
+      metafield: productPriceMetafield,
+      value: productPriceMetafield?.value,
+      valueType: typeof productPriceMetafield?.value,
+      parsed: productPriceMetafield?.value ? parseFloat(productPriceMetafield.value) : null
+    });
+    
+    const parsedProductPrice = productPriceMetafield?.value ? parseFloat(productPriceMetafield.value) : null;
+    
     return {
       bundleEnabled,
       bundleTiers,
       bundleGroupId: bundleGroupIdMetafield?.value || collection.handle || collectionHandle,
-      productPrice: productPriceMetafield?.value ? parseFloat(productPriceMetafield.value) : null
+      productPrice: parsedProductPrice
     };
   } catch (error) {
     console.error('Error getting collection bundle data:', error);
     return null;
+  }
+}
+
+/**
+ * Sync product price to bundle collections when product is updated
+ * Finds all collections containing this product that have bundle enabled,
+ * and updates their bundle_base_product_price metafield
+ */
+async function syncProductPriceToBundleCollections(productId, productPrice, shopDomain, apiToken, apiVersion) {
+  try {
+    console.log(`Syncing product price $${productPrice} to bundle collections for product ${productId}...`);
+    
+    // Get product's collections using GraphQL
+    const graphqlQuery = `
+      query GetProductCollections($id: ID!) {
+        product(id: $id) {
+          id
+          title
+          collections(first: 50) {
+            edges {
+              node {
+                id
+                handle
+                title
+                bundleEnabled: metafield(namespace: "custom", key: "bundle_enabled") {
+                  value
+                }
+                bundleProductPrice: metafield(namespace: "custom", key: "bundle_base_product_price") {
+                  id
+                  value
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    const response = await fetch(
+      `https://${shopDomain}/admin/api/${apiVersion}/graphql.json`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': apiToken
+        },
+        body: JSON.stringify({
+          query: graphqlQuery,
+          variables: {
+            id: `gid://shopify/Product/${productId}`
+          }
+        })
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error(`GraphQL request failed: ${response.statusText}`);
+    }
+
+    const data = await response.json();
+    
+    if (data.errors) {
+      console.error('GraphQL errors:', data.errors);
+      return;
+    }
+
+    const product = data.data?.product;
+    if (!product || !product.collections) {
+      console.log('Product not found or has no collections');
+      return;
+    }
+
+    // Find collections with bundle enabled
+    const bundleCollections = product.collections.edges
+      .map(edge => edge.node)
+      .filter(collection => {
+        const bundleEnabledValue = collection.bundleEnabled?.value;
+        return bundleEnabledValue === 'true' || bundleEnabledValue === true;
+      });
+
+    if (bundleCollections.length === 0) {
+      console.log(`No bundle collections found for product ${productId}`);
+      return;
+    }
+
+    console.log(`Found ${bundleCollections.length} bundle collection(s) for product ${productId}`);
+
+    // Update bundle_base_product_price metafield for each collection
+    for (let i = 0; i < bundleCollections.length; i++) {
+      const collection = bundleCollections[i];
+      const collectionId = collection.id.replace('gid://shopify/Collection/', '');
+      
+      // Add delay between updates to respect rate limits
+      if (i > 0) {
+        await new Promise(resolve => setTimeout(resolve, 600));
+      }
+
+      try {
+        // Check if metafield already exists
+        const existingMetafieldId = collection.bundleProductPrice?.id;
+        
+        if (existingMetafieldId) {
+          // Update existing metafield
+          const updateQuery = `
+            mutation UpdateCollectionMetafield($id: ID!, $value: String!) {
+              metafieldsSet(metafields: [{
+                id: $id
+                value: $value
+              }]) {
+                metafields {
+                  id
+                  value
+                }
+                userErrors {
+                  field
+                  message
+                }
+              }
+            }
+          `;
+
+          const updateResponse = await fetch(
+            `https://${shopDomain}/admin/api/${apiVersion}/graphql.json`,
+            {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'X-Shopify-Access-Token': apiToken
+              },
+              body: JSON.stringify({
+                query: updateQuery,
+                variables: {
+                  id: existingMetafieldId,
+                  value: productPrice.toString()
+                }
+              })
+            }
+          );
+
+          const updateData = await updateResponse.json();
+          
+          if (updateData.errors || updateData.data?.metafieldsSet?.userErrors?.length > 0) {
+            console.error(`Error updating metafield for collection ${collection.title}:`, 
+              updateData.errors || updateData.data?.metafieldsSet?.userErrors);
+          } else {
+            console.log(`✅ Updated bundle_base_product_price to $${productPrice} for collection: ${collection.title}`);
+            
+            // Trigger discount code update for this collection
+            // Get collection handle and title for processing
+            await processBundleDiscountCodes(collectionId, {
+              handle: collection.handle,
+              title: collection.title
+            });
+          }
+        } else {
+          // Create new metafield
+          const createQuery = `
+            mutation CreateCollectionMetafield($ownerId: ID!, $namespace: String!, $key: String!, $value: String!, $type: String!) {
+              metafieldsSet(metafields: [{
+                ownerId: $ownerId
+                namespace: $namespace
+                key: $key
+                value: $value
+                type: $type
+              }]) {
+                metafields {
+                  id
+                  value
+                }
+                userErrors {
+                  field
+                  message
+                }
+              }
+            }
+          `;
+
+          const createResponse = await fetch(
+            `https://${shopDomain}/admin/api/${apiVersion}/graphql.json`,
+            {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'X-Shopify-Access-Token': apiToken
+              },
+              body: JSON.stringify({
+                query: createQuery,
+                variables: {
+                  ownerId: collection.id,
+                  namespace: 'custom',
+                  key: 'bundle_base_product_price',
+                  value: productPrice.toString(),
+                  type: 'number_decimal'
+                }
+              })
+            }
+          );
+
+          const createData = await createResponse.json();
+          
+          if (createData.errors || createData.data?.metafieldsSet?.userErrors?.length > 0) {
+            console.error(`Error creating metafield for collection ${collection.title}:`, 
+              createData.errors || createData.data?.metafieldsSet?.userErrors);
+          } else {
+            console.log(`✅ Created bundle_base_product_price = $${productPrice} for collection: ${collection.title}`);
+            
+            // Trigger discount code update for this collection
+            await processBundleDiscountCodes(collectionId, {
+              handle: collection.handle,
+              title: collection.title
+            });
+          }
+        }
+      } catch (error) {
+        console.error(`Error syncing price to collection ${collection.title}:`, error);
+        // Continue with other collections even if one fails
+      }
+    }
+
+    console.log(`✅ Finished syncing product price to ${bundleCollections.length} bundle collection(s)`);
+  } catch (error) {
+    console.error('Error syncing product price to bundle collections:', error);
+    throw error;
   }
 }
 
@@ -399,9 +667,24 @@ async function processBundleDiscountCodes(collectionId, webhookData = {}) {
   const bundleGroupId = bundleData.bundleGroupId || collectionHandle;
   const productPrice = bundleData.productPrice;
   
-  if (!productPrice || productPrice <= 0) {
+  // Debug: Log what we received
+  console.log('Product price from bundleData:', {
+    productPrice: productPrice,
+    type: typeof productPrice,
+    isValid: productPrice && productPrice > 0
+  });
+  
+  if (!productPrice || productPrice <= 0 || isNaN(productPrice)) {
     console.error(`⚠️ WARNING: bundle_base_product_price metafield is missing or invalid for collection "${collectionTitle}"`);
+    console.error(`⚠️ Received value: ${productPrice} (type: ${typeof productPrice})`);
     console.error(`⚠️ Please set the "Bundle Base Product Price" metafield on this collection to the correct product price (e.g., 200.00)`);
+    console.error(`⚠️ Steps to fix:`);
+    console.error(`   1. Go to Shopify Admin → Products → Collections`);
+    console.error(`   2. Find collection: "${collectionTitle}"`);
+    console.error(`   3. Scroll to Metafields section`);
+    console.error(`   4. Find "Bundle Base Product Price" field`);
+    console.error(`   5. Set value to the product price in dollars (e.g., 200.00)`);
+    console.error(`   6. Click Save`);
     console.error(`⚠️ Skipping discount code creation for this collection`);
     return;
   }
