@@ -269,7 +269,7 @@ async function getBundleTiersFromCollection(collectionId, shopDomain, apiToken, 
 async function processBundleDiscountCodes(collectionId) {
   const shopDomain = process.env.SHOPIFY_STORE;
   const apiToken = process.env.SHOPIFY_API_TOKEN;
-  const apiVersion = '2024-01';
+  const apiVersion = '2025-10';
 
   // Get collection with metafields
   const collectionResponse = await fetch(
