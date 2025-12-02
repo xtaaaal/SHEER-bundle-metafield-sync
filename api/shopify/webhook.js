@@ -23,26 +23,53 @@ export default async function handler(req, res) {
 
   // Verify webhook signature (IMPORTANT for security!)
   const hmac = req.headers['x-shopify-hmac-sha256'];
-  const body = JSON.stringify(req.body);
   
   if (!hmac) {
     return res.status(401).json({ error: 'Missing webhook signature' });
   }
 
-  // Verify webhook authenticity
+  // Check if webhook secret is set
+  if (!process.env.SHOPIFY_WEBHOOK_SECRET) {
+    console.error('SHOPIFY_WEBHOOK_SECRET environment variable is not set');
+    return res.status(500).json({ error: 'Server configuration error' });
+  }
+
+  // Vercel automatically parses JSON, so we need to reconstruct the body
+  // Use JSON.stringify with no formatting to match Shopify's exact format
+  // This is critical - any difference in formatting will cause HMAC mismatch
+  const rawBody = JSON.stringify(req.body);
+
+  // Verify webhook authenticity using raw body
   const hash = crypto
     .createHmac('sha256', process.env.SHOPIFY_WEBHOOK_SECRET)
-    .update(body, 'utf8')
+    .update(rawBody, 'utf8')
     .digest('base64');
 
   if (hash !== hmac) {
     console.error('Webhook verification failed');
+    console.error('Expected HMAC:', hmac);
+    console.error('Calculated HMAC:', hash);
+    console.error('Webhook secret:', process.env.SHOPIFY_WEBHOOK_SECRET ? 'SET' : 'NOT SET');
+    console.error('Webhook secret length:', process.env.SHOPIFY_WEBHOOK_SECRET?.length);
+    console.error('Body length:', rawBody.length);
+    console.error('Body preview:', rawBody.substring(0, 200));
+    
+    // Additional debugging: check if secret matches expected format
+    const expectedSecret = 'd3d30faad404b38dceda835c0dd8298b';
+    if (process.env.SHOPIFY_WEBHOOK_SECRET !== expectedSecret) {
+      console.error('Secret mismatch! Expected:', expectedSecret);
+      console.error('Actual secret:', process.env.SHOPIFY_WEBHOOK_SECRET);
+    }
+    
     return res.status(401).json({ error: 'Unauthorized' });
   }
 
+  // Use parsed body (already available from req.body)
+  const body = req.body;
+
   try {
     // Handle collection metafield update
-    const metafield = req.body.metafield;
+    const metafield = body.metafield;
     
     if (!metafield) {
       return res.status(400).json({ error: 'No metafield in webhook' });
