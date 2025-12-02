@@ -125,33 +125,44 @@ export default async function handler(req, res) {
   }
 
   try {
-    // Handle collection metafield update
-    const metafield = body.metafield;
+    // Handle "Collection updated" webhook
+    // Note: Shopify doesn't have "Collection metafield updated" event
+    // We use "Collection updated" and check if bundle metafields need processing
     
-    if (!metafield) {
-      return res.status(400).json({ error: 'No metafield in webhook' });
+    // Check if this is a collection update webhook
+    // Collection update webhook payload: { id, handle, title, updated_at, ... }
+    const collectionId = body.id;
+    const collectionHandle = body.handle;
+    const collectionTitle = body.title;
+    
+    if (!collectionId) {
+      console.log('Webhook received but no collection ID found. Body keys:', Object.keys(body));
+      // This might be a different webhook type, ignore it
+      return res.status(200).json({ success: true, message: 'Not a collection update webhook' });
     }
 
-    // Check if it's a bundle-related metafield
-    if (metafield.namespace === 'custom' && 
-        (metafield.key === 'bundle_tiers' || metafield.key === 'bundle_enabled')) {
-      
-      console.log('Bundle metafield updated:', metafield.key);
-      
-      // Get collection ID from metafield owner
-      const collectionId = metafield.owner_id;
-      
-      // Process bundle discount codes
-      await processBundleDiscountCodes(collectionId);
-      
-      return res.status(200).json({ 
-        success: true, 
-        message: 'Bundle discount codes processed' 
-      });
-    }
-
-    // Not a bundle metafield, ignore
-    return res.status(200).json({ success: true, message: 'Ignored' });
+    console.log('Collection updated webhook received:', {
+      id: collectionId,
+      handle: collectionHandle,
+      title: collectionTitle,
+      updated_at: body.updated_at
+    });
+    
+    // Process bundle discount codes for this collection
+    // The function will:
+    // 1. Check if bundle is enabled
+    // 2. Get bundle tiers
+    // 3. Create/update discount codes for each tier
+    await processBundleDiscountCodes(collectionId);
+    
+    console.log('Successfully processed bundle discount codes for collection:', collectionTitle);
+    
+    return res.status(200).json({ 
+      success: true, 
+      message: 'Collection update processed, bundle discount codes checked',
+      collection_id: collectionId,
+      collection_handle: collectionHandle
+    });
 
   } catch (error) {
     console.error('Error processing webhook:', error);
