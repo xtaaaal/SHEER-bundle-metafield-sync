@@ -1,0 +1,14 @@
+{
+  "functions": {
+    "api/shopify/webhook.js": {
+      "includeFiles": "api/shopify/**"
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/api/shopify/webhook",
+      "destination": "/api/shopify/webhook.js"
+    }
+  ]
+}
+
