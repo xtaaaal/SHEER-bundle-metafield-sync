@@ -153,6 +153,11 @@ export default async function handler(req, res) {
     // 1. Check if bundle is enabled
     // 2. Get bundle tiers
     // 3. Create/update discount codes for each tier
+    
+    // Add a small delay to avoid rate limiting if multiple webhooks arrive quickly
+    // This is especially important when testing or if collections are updated in bulk
+    await new Promise(resolve => setTimeout(resolve, 500)); // 500ms delay
+    
     await processBundleDiscountCodes(collectionId);
     
     console.log('Successfully processed bundle discount codes for collection:', collectionTitle);
@@ -366,8 +371,53 @@ async function processBundleDiscountCodes(collectionId) {
   const apiToken = process.env.SHOPIFY_API_TOKEN;
   const apiVersion = '2025-10';
 
-  // Get collection with metafields
-  const collectionResponse = await fetch(
+  // Validate environment variables
+  if (!shopDomain) {
+    throw new Error('SHOPIFY_STORE environment variable is not set');
+  }
+  if (!apiToken) {
+    throw new Error('SHOPIFY_API_TOKEN environment variable is not set');
+  }
+
+  console.log('Processing bundle discount codes for collection:', collectionId);
+  console.log('Shop domain:', shopDomain);
+  console.log('API token present:', !!apiToken);
+  console.log('API token length:', apiToken?.length);
+
+  // Helper function to fetch with retry logic for rate limiting
+  async function fetchWithRetry(url, options, maxRetries = 3) {
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      const response = await fetch(url, options);
+      
+      // Check rate limit headers
+      const rateLimitRemaining = response.headers.get('X-Shopify-Shop-Api-Call-Limit');
+      const rateLimitMax = response.headers.get('X-Shopify-Shop-Api-Call-Limit-Max');
+      
+      if (rateLimitRemaining && rateLimitMax) {
+        console.log(`API rate limit: ${rateLimitRemaining}/${rateLimitMax} remaining`);
+      }
+      
+      // If rate limited, wait and retry
+      if (response.status === 429) {
+        const retryAfter = response.headers.get('Retry-After') || Math.pow(2, attempt); // Exponential backoff
+        console.warn(`Rate limited (429). Attempt ${attempt}/${maxRetries}. Retrying after ${retryAfter} seconds...`);
+        
+        if (attempt < maxRetries) {
+          await new Promise(resolve => setTimeout(resolve, retryAfter * 1000));
+          continue; // Retry
+        } else {
+          throw new Error(`Rate limited: Too many API requests. Please wait and try again later.`);
+        }
+      }
+      
+      // If successful or other error, return response
+      return response;
+    }
+  }
+
+  // Get collection with metafields (using REST API)
+  // Note: We need read_collections permission for this
+  const collectionResponse = await fetchWithRetry(
     `https://${shopDomain}/admin/api/${apiVersion}/collections/${collectionId}.json`,
     {
       headers: {
@@ -378,11 +428,33 @@ async function processBundleDiscountCodes(collectionId) {
   );
 
   if (!collectionResponse.ok) {
-    throw new Error(`Failed to get collection: ${collectionResponse.statusText}`);
+    const errorText = await collectionResponse.text();
+    console.error('Collection API error details:', {
+      status: collectionResponse.status,
+      statusText: collectionResponse.statusText,
+      error: errorText
+    });
+    
+    // Provide helpful error message
+    if (collectionResponse.status === 403) {
+      throw new Error(`Forbidden: API token doesn't have 'read_collections' permission. Check your custom app API scopes.`);
+    } else if (collectionResponse.status === 401) {
+      throw new Error(`Unauthorized: API token is invalid or expired. Check SHOPIFY_API_TOKEN environment variable.`);
+    } else if (collectionResponse.status === 429) {
+      throw new Error(`Rate limited: Too many API requests. The function will retry automatically, but you may need to wait.`);
+    } else {
+      throw new Error(`Failed to get collection (${collectionResponse.status}): ${collectionResponse.statusText}. Error: ${errorText}`);
+    }
   }
 
   const collectionData = await collectionResponse.json();
   const collection = collectionData.collection;
+  
+  if (!collection) {
+    throw new Error('Collection not found in API response');
+  }
+  
+  console.log('Collection retrieved:', collection.title);
 
   // Check if bundle is enabled (using GraphQL for better metafield access)
   const bundleEnabled = await checkBundleEnabled(collectionId, shopDomain, apiToken, apiVersion);
