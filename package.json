@@ -1,0 +1,10 @@
+{
+  "name": "bundle-discount-webhook",
+  "version": "1.0.0",
+  "description": "Shopify webhook handler for bundle discount codes",
+  "main": "api/shopify/webhook.js",
+  "scripts": {
+    "dev": "vercel dev"
+  },
+  "dependencies": {}
+}
