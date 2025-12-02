@@ -711,6 +711,7 @@ async function processBundleDiscountCodes(collectionId, webhookData = {}) {
       
       await createOrUpdateDiscountCode({
         collectionTitle, // Use title from webhook instead of full collection object
+        collectionId, // Pass collection ID for targeting
         tier,
         bundleGroupId,
         productPrice,
@@ -736,6 +737,7 @@ async function processBundleDiscountCodes(collectionId, webhookData = {}) {
  */
 async function createOrUpdateDiscountCode({
   collectionTitle,
+  collectionId, // Collection ID for targeting
   tier,
   bundleGroupId,
   productPrice,
@@ -797,7 +799,7 @@ async function createOrUpdateDiscountCode({
     } else {
       console.log(`Updating existing price rule for ${tier.quantity}-pack (found by title, code: ${code})`);
     }
-    await updatePriceRule(existingPriceRuleId, discountAmountCents, shopDomain, apiToken, apiVersion);
+    await updatePriceRule(existingPriceRuleId, discountAmountCents, collectionId, shopDomain, apiToken, apiVersion);
     
     // If we found by title but not by code, check if the discount code exists
     if (!existingCode && existingByTitle) {
@@ -815,6 +817,7 @@ async function createOrUpdateDiscountCode({
     await createNewDiscountCode({
       code,
       collectionTitle,
+      collectionId, // Pass collection ID
       tier,
       discountAmountCents,
       shopDomain,
@@ -983,6 +986,7 @@ async function createDiscountCodeForPriceRule(priceRuleId, code, shopDomain, api
 async function createNewDiscountCode({
   code,
   collectionTitle, // Changed from collection object to just title
+  collectionId, // Collection ID for targeting
   tier,
   discountAmountCents,
   shopDomain,
@@ -1032,7 +1036,7 @@ async function createNewDiscountCode({
         price_rule: {
           title: `Bundle Discount - ${collectionTitle} - ${tier.quantity}-Pack`,
           target_type: 'line_item',
-          target_selection: 'all',
+          target_selection: 'entitled', // 'entitled' with prerequisite_collection_ids = "Amount off products" applied to specific collection
           allocation_method: 'across',
           value_type: 'fixed_amount',
           value: `-${discountAmountDollars}`, // Convert cents to dollars for API
@@ -1040,7 +1044,8 @@ async function createNewDiscountCode({
           starts_at: new Date().toISOString(),
           ends_at: null,
           usage_limit: null,
-          once_per_customer: false
+          once_per_customer: false,
+          prerequisite_collection_ids: [parseInt(collectionId)] // CRITICAL: Apply discount only to this specific sibling collection (not all products)
         }
       })
     }
@@ -1093,10 +1098,11 @@ async function createNewDiscountCode({
 /**
  * Update existing price rule
  */
-async function updatePriceRule(priceRuleId, discountAmountCents, shopDomain, apiToken, apiVersion) {
+async function updatePriceRule(priceRuleId, discountAmountCents, collectionId, shopDomain, apiToken, apiVersion) {
   const discountAmountDollars = (discountAmountCents / 100).toFixed(2);
   console.log(`Updating price rule ${priceRuleId} with discount: $${discountAmountDollars} (${discountAmountCents} cents)`);
   
+  // Update both discount amount and collection targeting to ensure it's correct
   const response = await fetch(
     `https://${shopDomain}/admin/api/${apiVersion}/price_rules/${priceRuleId}.json`,
     {
@@ -1107,7 +1113,9 @@ async function updatePriceRule(priceRuleId, discountAmountCents, shopDomain, api
       },
       body: JSON.stringify({
         price_rule: {
-          value: `-${discountAmountDollars}` // Convert cents to dollars for API
+          value: `-${discountAmountDollars}`, // Convert cents to dollars for API
+          target_selection: 'entitled', // 'entitled' with prerequisite_collection_ids = "Amount off products" applied to specific collection
+          prerequisite_collection_ids: [parseInt(collectionId)] // CRITICAL: Ensure discount applies only to sibling collection (not all products)
         }
       })
     }
@@ -1118,6 +1126,6 @@ async function updatePriceRule(priceRuleId, discountAmountCents, shopDomain, api
     throw new Error(`Failed to update price rule: ${response.statusText} - ${JSON.stringify(errorData)}`);
   }
 
-  console.log(`✅ Updated price rule: ${priceRuleId}`);
+  console.log(`✅ Updated price rule: ${priceRuleId} with collection targeting (collection ID: ${collectionId})`);
 }
 
