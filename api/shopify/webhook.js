@@ -438,7 +438,7 @@ async function syncProductPriceToBundleCollections(productId, productPrice, shop
       
       // Add delay between updates to respect rate limits
       if (i > 0) {
-        await new Promise(resolve => setTimeout(resolve, 600));
+        await new Promise(resolve => setTimeout(resolve, 1000));
       }
 
       try {
@@ -693,6 +693,7 @@ async function processBundleDiscountCodes(collectionId, webhookData = {}) {
 
   // Process each bundle tier
   // Add delay between each tier to respect rate limits (2 calls per second for price rules)
+  // IMPORTANT: Need at least 1000ms (1 second) between price rule API calls to stay under 2/second limit
   for (let i = 0; i < bundleTiers.length; i++) {
     const tier = bundleTiers[i];
     
@@ -702,11 +703,15 @@ async function processBundleDiscountCodes(collectionId, webhookData = {}) {
     }
 
     try {
-      // Add delay before processing (except first one)
-      // 600ms delay = ~1.67 calls per second (under 2 calls/second limit)
+      // Add delay before processing each tier (including first one after GraphQL query)
+      // 1000ms delay = exactly 1 call per second (safely under 2 calls/second limit)
       if (i > 0) {
-        console.log(`Waiting 600ms before processing tier ${tier.quantity}...`);
-        await new Promise(resolve => setTimeout(resolve, 600));
+        console.log(`Waiting 1000ms before processing tier ${tier.quantity}...`);
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      } else {
+        // Add delay even for first tier to ensure rate limit is respected after GraphQL query
+        console.log(`Waiting 1000ms before processing first tier ${tier.quantity}...`);
+        await new Promise(resolve => setTimeout(resolve, 1000));
       }
       
       await createOrUpdateDiscountCode({
@@ -726,7 +731,8 @@ async function processBundleDiscountCodes(collectionId, webhookData = {}) {
       // Continue with other tiers even if one fails
       // Add delay even on error to respect rate limits
       if (i < bundleTiers.length - 1) {
-        await new Promise(resolve => setTimeout(resolve, 600));
+        console.log(`Waiting 1000ms after error before processing next tier...`);
+        await new Promise(resolve => setTimeout(resolve, 1000));
       }
     }
   }
@@ -881,6 +887,7 @@ async function findExistingDiscountCode(code, shopDomain, apiToken, apiVersion) 
 
 /**
  * Find existing price rule by exact title match (to prevent duplicates)
+ * Returns the first matching rule, but logs if duplicates are found
  */
 async function findExistingPriceRuleByTitle(title, shopDomain, apiToken, apiVersion) {
   try {
@@ -900,15 +907,24 @@ async function findExistingPriceRuleByTitle(title, shopDomain, apiToken, apiVers
 
     const data = await response.json();
     
-    // Find price rule with exact title match
-    const matchingRule = data.price_rules?.find(pr => pr.title === title);
+    // Find ALL price rules with exact title match (to detect duplicates)
+    const matchingRules = data.price_rules?.filter(pr => pr.title === title) || [];
     
-    if (matchingRule) {
-      console.log(`Found existing price rule by title: ${title} (ID: ${matchingRule.id})`);
-      return matchingRule;
+    if (matchingRules.length === 0) {
+      return null;
     }
-
-    return null;
+    
+    // If multiple matches found, log warning and prefer the first one
+    if (matchingRules.length > 1) {
+      console.warn(`⚠️ WARNING: Found ${matchingRules.length} duplicate price rules with title: "${title}"`);
+      console.warn(`⚠️ Price rule IDs: ${matchingRules.map(r => r.id).join(', ')}`);
+      console.warn(`⚠️ The function will update the first one (ID: ${matchingRules[0].id})`);
+      console.warn(`⚠️ Please manually delete the duplicate(s) from Shopify Admin`);
+    }
+    
+    // Return the first matching rule
+    console.log(`Found existing price rule by title: ${title} (ID: ${matchingRules[0].id})`);
+    return matchingRules[0];
   } catch (error) {
     console.error('Error finding existing price rule by title:', error);
     return null;
@@ -948,7 +964,9 @@ async function getDiscountCodeForPriceRule(priceRuleId, code, shopDomain, apiTok
 async function createDiscountCodeForPriceRule(priceRuleId, code, shopDomain, apiToken, apiVersion) {
   try {
     // Add delay before creating discount code (rate limit: 2 calls/second)
-    await new Promise(resolve => setTimeout(resolve, 600));
+    // Using 1000ms to be safe and stay well under the limit
+    console.log('Waiting 1000ms before creating discount code to respect rate limits...');
+    await new Promise(resolve => setTimeout(resolve, 1000));
     
     const response = await fetch(
       `https://${shopDomain}/admin/api/${apiVersion}/price_rules/${priceRuleId}/discount_codes.json`,
@@ -1016,8 +1034,9 @@ async function createNewDiscountCode({
   }
 
   // Add delay before creating price rule (rate limit: 2 calls/second = 500ms minimum between calls)
-  // Using 600ms to be safe
-  await new Promise(resolve => setTimeout(resolve, 600));
+  // Using 1000ms (1 second) to be safe and stay well under the limit
+  console.log('Waiting 1000ms before creating price rule to respect rate limits...');
+  await new Promise(resolve => setTimeout(resolve, 1000));
   
   // Convert cents to dollars for API (Shopify expects dollars, not cents)
   const discountAmountDollars = (discountAmountCents / 100).toFixed(2);
@@ -1066,8 +1085,10 @@ async function createNewDiscountCode({
     throw new Error('Failed to get price rule ID from response');
   }
 
-  // Add small delay before creating discount code (rate limit: 2 calls/second)
-  await new Promise(resolve => setTimeout(resolve, 600));
+  // Add delay before creating discount code (rate limit: 2 calls/second)
+  // Using 1000ms to be safe and stay well under the limit
+  console.log('Waiting 1000ms before creating discount code to respect rate limits...');
+  await new Promise(resolve => setTimeout(resolve, 1000));
   
   // Create discount code
   const codeResponse = await fetch(
