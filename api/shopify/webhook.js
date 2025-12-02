@@ -397,7 +397,16 @@ async function processBundleDiscountCodes(collectionId, webhookData = {}) {
 
   // Get bundle group ID and product price (from combined query)
   const bundleGroupId = bundleData.bundleGroupId || collectionHandle;
-  const productPrice = bundleData.productPrice || 820; // Default fallback
+  const productPrice = bundleData.productPrice;
+  
+  if (!productPrice || productPrice <= 0) {
+    console.error(`⚠️ WARNING: bundle_base_product_price metafield is missing or invalid for collection "${collectionTitle}"`);
+    console.error(`⚠️ Please set the "Bundle Base Product Price" metafield on this collection to the correct product price (e.g., 200.00)`);
+    console.error(`⚠️ Skipping discount code creation for this collection`);
+    return;
+  }
+  
+  console.log(`Using product price: $${productPrice.toFixed(2)} (from bundle_base_product_price metafield)`);
 
   // Process each bundle tier
   // Add delay between each tier to respect rate limits (2 calls per second for price rules)
@@ -443,7 +452,7 @@ async function processBundleDiscountCodes(collectionId, webhookData = {}) {
  * Create or update discount code for a bundle tier
  */
 async function createOrUpdateDiscountCode({
-  collection,
+  collectionTitle,
   tier,
   bundleGroupId,
   productPrice,
@@ -452,10 +461,23 @@ async function createOrUpdateDiscountCode({
   apiVersion
 }) {
   // Calculate discount amount (in cents)
-  const productPriceCents = productPrice * 100;
-  const bundlePriceCents = tier.price * 100;
+  // IMPORTANT: productPrice should be the price per item in dollars
+  // tier.price is the total bundle price for tier.quantity items
+  const productPriceCents = Math.round(productPrice * 100);
+  const bundlePriceCents = Math.round(tier.price * 100);
   const regularTotalCents = productPriceCents * tier.quantity;
   const discountAmountCents = regularTotalCents - bundlePriceCents;
+
+  console.log(`Calculating discount for ${tier.quantity}-pack:`, {
+    productPrice: productPrice,
+    productPriceCents: productPriceCents,
+    bundlePrice: tier.price,
+    bundlePriceCents: bundlePriceCents,
+    regularTotal: (productPrice * tier.quantity).toFixed(2),
+    regularTotalCents: regularTotalCents,
+    discountAmount: (discountAmountCents / 100).toFixed(2),
+    discountAmountCents: discountAmountCents
+  });
 
   if (discountAmountCents <= 0) {
     console.warn(`No discount for ${tier.quantity}-pack (bundle price >= regular price)`);
@@ -471,19 +493,45 @@ async function createOrUpdateDiscountCode({
   
   const code = `BUNDLE-${tier.quantity}PACK-${bundleGroupIdFormatted}`;
 
-  // Check if discount code already exists
+  // Check if discount code already exists (by exact code match)
   const existingCode = await findExistingDiscountCode(code, shopDomain, apiToken, apiVersion);
+  
+  // Also check if a price rule with the same title exists (to catch duplicates)
+  const existingByTitle = await findExistingPriceRuleByTitle(
+    `Bundle Discount - ${collectionTitle} - ${tier.quantity}-Pack`,
+    shopDomain,
+    apiToken,
+    apiVersion
+  );
 
-  if (existingCode) {
+  // Use existing price rule if found (either by code or by title)
+  const existingPriceRuleId = existingCode?.price_rule_id || existingByTitle?.id;
+  
+  if (existingPriceRuleId) {
     // Update existing price rule
-    console.log(`Updating existing discount code: ${code}`);
-    await updatePriceRule(existingCode.price_rule_id, discountAmountCents, shopDomain, apiToken, apiVersion);
+    if (existingCode) {
+      console.log(`Updating existing discount code: ${code} (found by code)`);
+    } else {
+      console.log(`Updating existing price rule for ${tier.quantity}-pack (found by title, code: ${code})`);
+    }
+    await updatePriceRule(existingPriceRuleId, discountAmountCents, shopDomain, apiToken, apiVersion);
+    
+    // If we found by title but not by code, check if the discount code exists
+    if (!existingCode && existingByTitle) {
+      // Check if discount code already exists for this price rule
+      const codeForRule = await getDiscountCodeForPriceRule(existingPriceRuleId, code, shopDomain, apiToken, apiVersion);
+      if (!codeForRule) {
+        // Code doesn't exist, create it
+        console.log(`Creating discount code ${code} for existing price rule`);
+        await createDiscountCodeForPriceRule(existingPriceRuleId, code, shopDomain, apiToken, apiVersion);
+      }
+    }
   } else {
     // Create new price rule and discount code
     console.log(`Creating new discount code: ${code}`);
     await createNewDiscountCode({
       code,
-      collection,
+      collectionTitle,
       tier,
       discountAmountCents,
       shopDomain,
@@ -494,13 +542,11 @@ async function createOrUpdateDiscountCode({
 }
 
 /**
- * Find existing discount code
+ * Find existing discount code by exact code match
  */
 async function findExistingDiscountCode(code, shopDomain, apiToken, apiVersion) {
   try {
-    // Search price rules by title pattern
-    const searchTitle = `Bundle Discount - ${code.split('-')[1]}`;
-    
+    // Get all price rules
     const response = await fetch(
       `https://${shopDomain}/admin/api/${apiVersion}/price_rules.json?limit=250`,
       {
@@ -534,6 +580,7 @@ async function findExistingDiscountCode(code, shopDomain, apiToken, apiVersion) 
         const matchingCode = codesData.discount_codes?.find(dc => dc.code === code);
         
         if (matchingCode) {
+          console.log(`Found existing discount code: ${code} in price rule ${priceRule.id}`);
           return { ...matchingCode, price_rule_id: priceRule.id };
         }
       }
@@ -543,6 +590,107 @@ async function findExistingDiscountCode(code, shopDomain, apiToken, apiVersion) 
   } catch (error) {
     console.error('Error finding existing discount code:', error);
     return null;
+  }
+}
+
+/**
+ * Find existing price rule by exact title match (to prevent duplicates)
+ */
+async function findExistingPriceRuleByTitle(title, shopDomain, apiToken, apiVersion) {
+  try {
+    const response = await fetch(
+      `https://${shopDomain}/admin/api/${apiVersion}/price_rules.json?limit=250`,
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': apiToken
+        }
+      }
+    );
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const data = await response.json();
+    
+    // Find price rule with exact title match
+    const matchingRule = data.price_rules?.find(pr => pr.title === title);
+    
+    if (matchingRule) {
+      console.log(`Found existing price rule by title: ${title} (ID: ${matchingRule.id})`);
+      return matchingRule;
+    }
+
+    return null;
+  } catch (error) {
+    console.error('Error finding existing price rule by title:', error);
+    return null;
+  }
+}
+
+/**
+ * Get discount code for a specific price rule
+ */
+async function getDiscountCodeForPriceRule(priceRuleId, code, shopDomain, apiToken, apiVersion) {
+  try {
+    const response = await fetch(
+      `https://${shopDomain}/admin/api/${apiVersion}/price_rules/${priceRuleId}/discount_codes.json`,
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': apiToken
+        }
+      }
+    );
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const data = await response.json();
+    return data.discount_codes?.find(dc => dc.code === code) || null;
+  } catch (error) {
+    console.error('Error getting discount code for price rule:', error);
+    return null;
+  }
+}
+
+/**
+ * Create discount code for an existing price rule
+ */
+async function createDiscountCodeForPriceRule(priceRuleId, code, shopDomain, apiToken, apiVersion) {
+  try {
+    // Add delay before creating discount code (rate limit: 2 calls/second)
+    await new Promise(resolve => setTimeout(resolve, 600));
+    
+    const response = await fetch(
+      `https://${shopDomain}/admin/api/${apiVersion}/price_rules/${priceRuleId}/discount_codes.json`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': apiToken
+        },
+        body: JSON.stringify({
+          discount_code: {
+            code: code
+          }
+        })
+      }
+    );
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(`Failed to create discount code: ${response.statusText} - ${JSON.stringify(errorData)}`);
+    }
+
+    const data = await response.json();
+    console.log(`✅ Created discount code ${code} for price rule ${priceRuleId}`);
+    return data.discount_code;
+  } catch (error) {
+    console.error('Error creating discount code for price rule:', error);
+    throw error;
   }
 }
 
