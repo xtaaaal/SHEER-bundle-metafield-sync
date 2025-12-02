@@ -1015,6 +1015,10 @@ async function createNewDiscountCode({
   // Using 600ms to be safe
   await new Promise(resolve => setTimeout(resolve, 600));
   
+  // Convert cents to dollars for API (Shopify expects dollars, not cents)
+  const discountAmountDollars = (discountAmountCents / 100).toFixed(2);
+  console.log(`Creating price rule with discount: $${discountAmountDollars} (${discountAmountCents} cents)`);
+  
   // Create price rule with retry logic
   const priceRuleResponse = await fetchWithRetry(
     `https://${shopDomain}/admin/api/${apiVersion}/price_rules.json`,
@@ -1031,7 +1035,7 @@ async function createNewDiscountCode({
           target_selection: 'all',
           allocation_method: 'across',
           value_type: 'fixed_amount',
-          value: `-${discountAmountCents}`,
+          value: `-${discountAmountDollars}`, // Convert cents to dollars for API
           customer_selection: 'all',
           starts_at: new Date().toISOString(),
           ends_at: null,
@@ -1090,6 +1094,9 @@ async function createNewDiscountCode({
  * Update existing price rule
  */
 async function updatePriceRule(priceRuleId, discountAmountCents, shopDomain, apiToken, apiVersion) {
+  const discountAmountDollars = (discountAmountCents / 100).toFixed(2);
+  console.log(`Updating price rule ${priceRuleId} with discount: $${discountAmountDollars} (${discountAmountCents} cents)`);
+  
   const response = await fetch(
     `https://${shopDomain}/admin/api/${apiVersion}/price_rules/${priceRuleId}.json`,
     {
@@ -1100,7 +1107,7 @@ async function updatePriceRule(priceRuleId, discountAmountCents, shopDomain, api
       },
       body: JSON.stringify({
         price_rule: {
-          value: `-${discountAmountCents}`
+          value: `-${discountAmountDollars}` // Convert cents to dollars for API
         }
       })
     }
