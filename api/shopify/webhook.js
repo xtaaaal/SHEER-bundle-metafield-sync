@@ -190,14 +190,16 @@ export default async function handler(req, res) {
  * Reduces from 3 separate queries to 1 query = 2 fewer API calls!
  */
 async function getCollectionBundleData(collectionId, shopDomain, apiToken, apiVersion, collectionHandle) {
+  // Use separate metafield queries since we can't query multiple with different structures in one query
+  // But we can still combine them into one GraphQL request using aliases
   const graphqlQuery = `
     query GetCollectionBundleData($id: ID!) {
       collection(id: $id) {
         handle
-        metafield(namespace: "custom", key: "bundle_enabled") {
+        bundleEnabled: metafield(namespace: "custom", key: "bundle_enabled") {
           value
         }
-        metafield(namespace: "custom", key: "bundle_tiers") {
+        bundleTiers: metafield(namespace: "custom", key: "bundle_tiers") {
           value
           references(first: 10) {
             edges {
@@ -213,11 +215,10 @@ async function getCollectionBundleData(collectionId, shopDomain, apiToken, apiVe
             }
           }
         }
-        metafields(identifiers: [
-          {namespace: "custom", key: "bundle_group_id"},
-          {namespace: "custom", key: "bundle_base_product_price"}
-        ]) {
-          key
+        bundleGroupId: metafield(namespace: "custom", key: "bundle_group_id") {
+          value
+        }
+        bundleProductPrice: metafield(namespace: "custom", key: "bundle_base_product_price") {
           value
         }
       }
@@ -258,30 +259,36 @@ async function getCollectionBundleData(collectionId, shopDomain, apiToken, apiVe
       return null;
     }
 
-    // Extract bundle_enabled
-    const bundleEnabledValue = collection.metafield?.value;
+    // Extract bundle_enabled (using alias)
+    const bundleEnabledValue = collection.bundleEnabled?.value;
     const bundleEnabled = bundleEnabledValue === 'true' || bundleEnabledValue === true;
 
-    // Extract bundle_tiers (metaobject references)
-    const references = collection.metafield?.references?.edges || [];
-    const bundleTiers = references.map(edge => {
-      const metaobject = edge.node;
-      const fields = {};
-      
-      metaobject.fields.forEach(field => {
-        fields[field.key] = field.value;
+    // Extract bundle_tiers (metaobject references) - using alias
+    const bundleTiersMetafield = collection.bundleTiers;
+    let bundleTiers = [];
+    
+    if (bundleTiersMetafield?.references?.edges) {
+      bundleTiers = bundleTiersMetafield.references.edges.map(edge => {
+        const metaobject = edge.node;
+        const fields = {};
+        
+        if (metaobject.fields) {
+          metaobject.fields.forEach(field => {
+            fields[field.key] = field.value;
+          });
+        }
+        
+        return {
+          quantity: parseInt(fields.quantity) || 0,
+          price: parseFloat(fields.price) || 0,
+          discount_percent: fields.discount_percent ? parseFloat(fields.discount_percent) : null
+        };
       });
-      
-      return {
-        quantity: parseInt(fields.quantity) || 0,
-        price: parseFloat(fields.price) || 0,
-        discount_percent: fields.discount_percent ? parseFloat(fields.discount_percent) : null
-      };
-    });
+    }
 
-    // Extract bundle_group_id and product_price
-    const bundleGroupIdMetafield = collection.metafields?.find(m => m.key === 'bundle_group_id');
-    const productPriceMetafield = collection.metafields?.find(m => m.key === 'bundle_base_product_price');
+    // Extract bundle_group_id and product_price (using aliases)
+    const bundleGroupIdMetafield = collection.bundleGroupId;
+    const productPriceMetafield = collection.bundleProductPrice;
     
     return {
       bundleEnabled,
