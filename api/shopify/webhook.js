@@ -1036,7 +1036,7 @@ async function createNewDiscountCode({
         price_rule: {
           title: `Bundle Discount - ${collectionTitle} - ${tier.quantity}-Pack`,
           target_type: 'line_item',
-          target_selection: 'entitled', // 'entitled' with prerequisite_collection_ids = "Amount off products" applied to specific collection
+          target_selection: 'entitled', // 'entitled' with entitled_collection_ids = "Amount off products" applied to specific collection
           allocation_method: 'across',
           value_type: 'fixed_amount',
           value: `-${discountAmountDollars}`, // Convert cents to dollars for API
@@ -1045,7 +1045,7 @@ async function createNewDiscountCode({
           ends_at: null,
           usage_limit: null,
           once_per_customer: false,
-          prerequisite_collection_ids: [parseInt(collectionId)] // CRITICAL: Apply discount only to this specific sibling collection (not all products)
+          entitled_collection_ids: [parseInt(collectionId)] // CRITICAL: Apply discount only to products in this specific sibling collection (not all products)
         }
       })
     }
@@ -1114,8 +1114,8 @@ async function updatePriceRule(priceRuleId, discountAmountCents, collectionId, s
       body: JSON.stringify({
         price_rule: {
           value: `-${discountAmountDollars}`, // Convert cents to dollars for API
-          target_selection: 'entitled', // 'entitled' with prerequisite_collection_ids = "Amount off products" applied to specific collection
-          prerequisite_collection_ids: [parseInt(collectionId)] // CRITICAL: Ensure discount applies only to sibling collection (not all products)
+          target_selection: 'entitled', // 'entitled' with entitled_collection_ids = "Amount off products" applied to specific collection
+          entitled_collection_ids: [parseInt(collectionId)] // CRITICAL: Ensure discount applies only to products in sibling collection (not all products)
         }
       })
     }
