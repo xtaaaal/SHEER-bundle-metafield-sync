@@ -779,7 +779,6 @@ async function createOrUpdateDiscountCode({
   const bundleGroupIdFormatted = bundleGroupId
     .toString()
     .toUpperCase()
-    .replace(/-/g, '')
     .substring(0, 20);
   
   const code = `BUNDLE-${tier.quantity}PACK-${bundleGroupIdFormatted}`;
