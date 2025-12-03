@@ -781,7 +781,7 @@ async function createOrUpdateDiscountCode({
     .toUpperCase()
     .substring(0, 20);
   
-  const code = `BUNDLE-${tier.quantity}PACK-${bundleGroupIdFormatted}`;
+  const code = `BDL-${tier.quantity}P-${bundleGroupIdFormatted}`;
 
   // Check if discount code already exists (by exact code match)
   const existingCode = await findExistingDiscountCode(code, shopDomain, apiToken, apiVersion);
