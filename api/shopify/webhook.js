@@ -1063,7 +1063,12 @@ async function createNewDiscountCode({
           ends_at: null,
           usage_limit: null,
           once_per_customer: false,
-          entitled_collection_ids: [parseInt(collectionId)] // CRITICAL: Apply discount only to products in this specific sibling collection (not all products)
+          entitled_collection_ids: [parseInt(collectionId)], // CRITICAL: Apply discount only to products in this specific sibling collection (not all products)
+          combines_with: {
+            order_discounts: true, // Allow combining with other order-level discounts (e.g., FW25-950OFF-6000)
+            product_discounts: true, // Allow combining with product discounts
+            shipping_discounts: true // Allow combining with shipping discounts
+          }
         }
       })
     }
@@ -1135,7 +1140,12 @@ async function updatePriceRule(priceRuleId, discountAmountCents, collectionId, s
         price_rule: {
           value: `-${discountAmountDollars}`, // Convert cents to dollars for API
           target_selection: 'entitled', // 'entitled' with entitled_collection_ids = "Amount off products" applied to specific collection
-          entitled_collection_ids: [parseInt(collectionId)] // CRITICAL: Ensure discount applies only to products in sibling collection (not all products)
+          entitled_collection_ids: [parseInt(collectionId)], // CRITICAL: Ensure discount applies only to products in sibling collection (not all products)
+          combines_with: {
+            order_discounts: true, // Allow combining with other order-level discounts (e.g., FW25-950OFF-6000)
+            product_discounts: true, // Allow combining with product discounts
+            shipping_discounts: true // Allow combining with shipping discounts
+          }
         }
       })
     }
