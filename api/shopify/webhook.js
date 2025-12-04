@@ -1088,6 +1088,18 @@ async function createNewDiscountCode({
   if (!priceRuleId) {
     throw new Error('Failed to get price rule ID from response');
   }
+  
+  // Verify that combines_with was set in the created price rule
+  if (priceRuleData.price_rule?.combines_with) {
+    console.log('✅ Price rule created with combines_with enabled:', {
+      order_discounts: priceRuleData.price_rule.combines_with.order_discounts,
+      product_discounts: priceRuleData.price_rule.combines_with.product_discounts,
+      shipping_discounts: priceRuleData.price_rule.combines_with.shipping_discounts
+    });
+  } else {
+    console.warn('⚠️ WARNING: Price rule created but combines_with property was not returned in response');
+    console.warn('⚠️ Response:', JSON.stringify(priceRuleData, null, 2));
+  }
 
   // Add delay before creating discount code (rate limit: 2 calls/second)
   // Using 1000ms to be safe and stay well under the limit
@@ -1127,7 +1139,23 @@ async function updatePriceRule(priceRuleId, discountAmountCents, collectionId, s
   const discountAmountDollars = (discountAmountCents / 100).toFixed(2);
   console.log(`Updating price rule ${priceRuleId} with discount: $${discountAmountDollars} (${discountAmountCents} cents)`);
   
-  // Update both discount amount and collection targeting to ensure it's correct
+  // Prepare update payload with combines_with enabled for discount combinations
+  const updatePayload = {
+    price_rule: {
+      value: `-${discountAmountDollars}`, // Convert cents to dollars for API
+      target_selection: 'entitled', // 'entitled' with entitled_collection_ids = "Amount off products" applied to specific collection
+      entitled_collection_ids: [parseInt(collectionId)], // CRITICAL: Ensure discount applies only to products in sibling collection (not all products)
+      combines_with: {
+        order_discounts: true, // Allow combining with other order-level discounts (e.g., FW25-950OFF-6000)
+        product_discounts: true, // Allow combining with product discounts
+        shipping_discounts: true // Allow combining with shipping discounts
+      }
+    }
+  };
+  
+  console.log('Updating price rule with combines_with enabled:', JSON.stringify(updatePayload, null, 2));
+  
+  // Update both discount amount, collection targeting, and discount combinations
   const response = await fetch(
     `https://${shopDomain}/admin/api/${apiVersion}/price_rules/${priceRuleId}.json`,
     {
@@ -1136,26 +1164,31 @@ async function updatePriceRule(priceRuleId, discountAmountCents, collectionId, s
         'Content-Type': 'application/json',
         'X-Shopify-Access-Token': apiToken
       },
-      body: JSON.stringify({
-        price_rule: {
-          value: `-${discountAmountDollars}`, // Convert cents to dollars for API
-          target_selection: 'entitled', // 'entitled' with entitled_collection_ids = "Amount off products" applied to specific collection
-          entitled_collection_ids: [parseInt(collectionId)], // CRITICAL: Ensure discount applies only to products in sibling collection (not all products)
-          combines_with: {
-            order_discounts: true, // Allow combining with other order-level discounts (e.g., FW25-950OFF-6000)
-            product_discounts: true, // Allow combining with product discounts
-            shipping_discounts: true // Allow combining with shipping discounts
-          }
-        }
-      })
+      body: JSON.stringify(updatePayload)
     }
   );
 
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
+    console.error('Failed to update price rule. Error:', JSON.stringify(errorData, null, 2));
     throw new Error(`Failed to update price rule: ${response.statusText} - ${JSON.stringify(errorData)}`);
   }
 
-  console.log(`✅ Updated price rule: ${priceRuleId} with collection targeting (collection ID: ${collectionId})`);
+  const updatedRule = await response.json().catch(() => ({}));
+  
+  // Verify that combines_with was actually applied
+  if (updatedRule.price_rule?.combines_with) {
+    const combinesWith = updatedRule.price_rule.combines_with;
+    console.log(`✅ Updated price rule: ${priceRuleId} with collection targeting and discount combinations enabled`);
+    console.log('✅ combines_with verified:', {
+      order_discounts: combinesWith.order_discounts,
+      product_discounts: combinesWith.product_discounts,
+      shipping_discounts: combinesWith.shipping_discounts
+    });
+  } else {
+    console.warn(`⚠️ WARNING: Price rule ${priceRuleId} was updated but combines_with property was not returned in response`);
+    console.warn('⚠️ This might indicate the property was not applied correctly. Please check in Shopify Admin.');
+    console.warn('⚠️ Response:', JSON.stringify(updatedRule, null, 2));
+  }
 }
 
