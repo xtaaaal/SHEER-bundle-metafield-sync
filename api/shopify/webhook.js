@@ -1091,14 +1091,24 @@ async function createNewDiscountCode({
   
   // Verify that combines_with was set in the created price rule
   if (priceRuleData.price_rule?.combines_with) {
+    const combinesWith = priceRuleData.price_rule.combines_with;
     console.log('✅ Price rule created with combines_with enabled:', {
-      order_discounts: priceRuleData.price_rule.combines_with.order_discounts,
-      product_discounts: priceRuleData.price_rule.combines_with.product_discounts,
-      shipping_discounts: priceRuleData.price_rule.combines_with.shipping_discounts
+      order_discounts: combinesWith.order_discounts,
+      product_discounts: combinesWith.product_discounts,
+      shipping_discounts: combinesWith.shipping_discounts
     });
+    
+    // Check if all three are actually true
+    if (!combinesWith.product_discounts || !combinesWith.order_discounts || !combinesWith.shipping_discounts) {
+      console.warn('⚠️ WARNING: combines_with was set but not all values are true!');
+      console.warn('⚠️ Expected: all true, but got:', combinesWith);
+      console.warn('⚠️ This may indicate the API did not accept all combination settings.');
+    }
   } else {
-    console.warn('⚠️ WARNING: Price rule created but combines_with property was not returned in response');
-    console.warn('⚠️ Response:', JSON.stringify(priceRuleData, null, 2));
+    console.error('❌ ERROR: Price rule created but combines_with property was not returned in response');
+    console.error('❌ This means the property was NOT applied by Shopify API');
+    console.error('❌ Full response:', JSON.stringify(priceRuleData, null, 2));
+    console.error('❌ You may need to manually enable combinations in Shopify Admin');
   }
 
   // Add delay before creating discount code (rate limit: 2 calls/second)
@@ -1139,7 +1149,33 @@ async function updatePriceRule(priceRuleId, discountAmountCents, collectionId, s
   const discountAmountDollars = (discountAmountCents / 100).toFixed(2);
   console.log(`Updating price rule ${priceRuleId} with discount: $${discountAmountDollars} (${discountAmountCents} cents)`);
   
-  // Prepare update payload with combines_with enabled for discount combinations
+  // First, fetch the existing price rule to preserve all existing fields
+  // This ensures we don't accidentally reset other settings
+  let existingRule = null;
+  try {
+    const getResponse = await fetch(
+      `https://${shopDomain}/admin/api/${apiVersion}/price_rules/${priceRuleId}.json`,
+      {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': apiToken
+        }
+      }
+    );
+    
+    if (getResponse.ok) {
+      const getData = await getResponse.json();
+      existingRule = getData.price_rule;
+      console.log('Fetched existing price rule. Current combines_with:', existingRule?.combines_with);
+    } else {
+      console.warn('Could not fetch existing price rule, proceeding with partial update');
+    }
+  } catch (error) {
+    console.warn('Error fetching existing price rule:', error.message);
+  }
+  
+  // Prepare update payload - merge with existing rule if available
   const updatePayload = {
     price_rule: {
       value: `-${discountAmountDollars}`, // Convert cents to dollars for API
@@ -1152,6 +1188,20 @@ async function updatePriceRule(priceRuleId, discountAmountCents, collectionId, s
       }
     }
   };
+  
+  // If we have the existing rule, preserve other important fields
+  if (existingRule) {
+    // Preserve fields that shouldn't change
+    if (existingRule.title) updatePayload.price_rule.title = existingRule.title;
+    if (existingRule.target_type) updatePayload.price_rule.target_type = existingRule.target_type;
+    if (existingRule.allocation_method) updatePayload.price_rule.allocation_method = existingRule.allocation_method;
+    if (existingRule.value_type) updatePayload.price_rule.value_type = existingRule.value_type;
+    if (existingRule.customer_selection) updatePayload.price_rule.customer_selection = existingRule.customer_selection;
+    if (existingRule.starts_at) updatePayload.price_rule.starts_at = existingRule.starts_at;
+    if (existingRule.ends_at !== undefined) updatePayload.price_rule.ends_at = existingRule.ends_at;
+    if (existingRule.usage_limit !== undefined) updatePayload.price_rule.usage_limit = existingRule.usage_limit;
+    if (existingRule.once_per_customer !== undefined) updatePayload.price_rule.once_per_customer = existingRule.once_per_customer;
+  }
   
   console.log('Updating price rule with combines_with enabled:', JSON.stringify(updatePayload, null, 2));
   
@@ -1185,10 +1235,19 @@ async function updatePriceRule(priceRuleId, discountAmountCents, collectionId, s
       product_discounts: combinesWith.product_discounts,
       shipping_discounts: combinesWith.shipping_discounts
     });
+    
+    // Check if all three are actually true
+    if (!combinesWith.product_discounts || !combinesWith.order_discounts || !combinesWith.shipping_discounts) {
+      console.error('❌ ERROR: combines_with was updated but not all values are true!');
+      console.error('❌ Expected: all true, but got:', combinesWith);
+      console.error('❌ This indicates the API did not accept all combination settings.');
+      console.error('❌ You may need to manually enable combinations in Shopify Admin.');
+    }
   } else {
-    console.warn(`⚠️ WARNING: Price rule ${priceRuleId} was updated but combines_with property was not returned in response`);
-    console.warn('⚠️ This might indicate the property was not applied correctly. Please check in Shopify Admin.');
-    console.warn('⚠️ Response:', JSON.stringify(updatedRule, null, 2));
+    console.error(`❌ ERROR: Price rule ${priceRuleId} was updated but combines_with property was not returned in response`);
+    console.error('❌ This means the property was NOT applied by Shopify API');
+    console.error('❌ Full response:', JSON.stringify(updatedRule, null, 2));
+    console.error('❌ You need to manually enable combinations in Shopify Admin for this discount.');
   }
 }
 
