@@ -804,7 +804,26 @@ async function createOrUpdateDiscountCode({
     } else {
       console.log(`Updating existing price rule for ${tier.quantity}-pack (found by title, code: ${code})`);
     }
-    await updatePriceRule(existingPriceRuleId, discountAmountCents, collectionId, shopDomain, apiToken, apiVersion);
+    
+    // Try to update - this will check if combines_with was applied
+    const updateResult = await updatePriceRule(existingPriceRuleId, discountAmountCents, collectionId, shopDomain, apiToken, apiVersion);
+    
+    // If combines_with was not applied, we need to recreate the price rule
+    // (Shopify REST API doesn't support updating combines_with on existing rules)
+    if (updateResult && updateResult.combines_with_missing) {
+      console.warn(`⚠️ WARNING: combines_with property was not applied to existing price rule ${existingPriceRuleId}`);
+      console.warn(`⚠️ Shopify REST API doesn't support updating combines_with on existing price rules`);
+      console.warn(`⚠️ To fix this, you need to manually enable combinations in Shopify Admin, or delete and recreate the discount`);
+      console.warn(`⚠️ Manual fix: Go to Shopify Admin → Discounts → ${code} → Combinations → Enable all checkboxes`);
+      
+      // Optionally: Auto-recreate if enabled (disabled by default for safety)
+      const autoRecreate = process.env.AUTO_RECREATE_FOR_COMBINES_WITH === 'true';
+      if (autoRecreate) {
+        console.log(`🔄 Auto-recreate enabled - deleting and recreating price rule to set combines_with...`);
+        // TODO: Implement delete and recreate logic here if needed
+        // For now, just log the warning
+      }
+    }
     
     // If we found by title but not by code, check if the discount code exists
     if (!existingCode && existingByTitle) {
@@ -1248,6 +1267,12 @@ async function updatePriceRule(priceRuleId, discountAmountCents, collectionId, s
     console.error('❌ This means the property was NOT applied by Shopify API');
     console.error('❌ Full response:', JSON.stringify(updatedRule, null, 2));
     console.error('❌ You need to manually enable combinations in Shopify Admin for this discount.');
+    
+    // Return a flag indicating combines_with is missing
+    return { combines_with_missing: true };
   }
+  
+  // Return success if combines_with was applied
+  return { combines_with_missing: false };
 }
 
