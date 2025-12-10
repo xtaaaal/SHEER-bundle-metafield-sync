@@ -783,27 +783,58 @@ async function createOrUpdateDiscountCode({
   
   const code = `BDL-${tier.quantity}P-${bundleGroupIdFormatted}`;
 
-  // Check if discount code already exists (by exact code match)
+  // Check if discount code already exists (by exact code match) - this is the PRIMARY check
   const existingCode = await findExistingDiscountCode(code, shopDomain, apiToken, apiVersion);
   
-  // Also check if a price rule with the same title exists (to catch duplicates)
-  const existingByTitle = await findExistingPriceRuleByTitle(
-    `Bundle Discount - ${collectionTitle} - ${tier.quantity}-Pack`,
-    shopDomain,
-    apiToken,
-    apiVersion
-  );
-
-  // Use existing price rule if found (either by code or by title)
-  const existingPriceRuleId = existingCode?.price_rule_id || existingByTitle?.id;
-  
-  if (existingPriceRuleId) {
-    // Update existing price rule
-    if (existingCode) {
-      console.log(`Updating existing discount code: ${code} (found by code)`);
-    } else {
-      console.log(`Updating existing price rule for ${tier.quantity}-pack (found by title, code: ${code})`);
+  // If discount code exists, use that price rule (prevent duplicates)
+  if (existingCode) {
+    console.log(`✅ Found existing discount code: ${code} on price rule ${existingCode.price_rule_id}`);
+    console.log(`✅ Will update existing price rule to prevent duplicates`);
+    
+    // Also check if there are other price rules with the same title (duplicates)
+    // Only check for "Bundle Discount" duplicates
+    const discountTitle = `Bundle Discount - ${collectionTitle} - ${tier.quantity}-Pack`;
+    const existingByTitle = await findExistingPriceRuleByTitle(
+      discountTitle,
+      shopDomain,
+      apiToken,
+      apiVersion
+    );
+    
+    // If we found duplicates by title, delete the ones that don't have our discount code
+    // Only delete if title starts with "Bundle Discount"
+    if (existingByTitle && existingByTitle.allMatches && existingByTitle.allMatches.length > 1) {
+      // Filter to only "Bundle Discount" duplicates
+      const bundleDiscountDuplicates = existingByTitle.allMatches.filter(pr => 
+        pr.title && pr.title.startsWith('Bundle Discount')
+      );
+      
+      const duplicatesWithoutCode = bundleDiscountDuplicates.filter(pr => 
+        pr.id !== existingCode.price_rule_id
+      );
+      
+      if (duplicatesWithoutCode.length > 0) {
+        console.warn(`⚠️ Found ${duplicatesWithoutCode.length} duplicate "Bundle Discount" price rules without discount code`);
+        console.warn(`⚠️ Deleting duplicates: ${duplicatesWithoutCode.map(r => r.id).join(', ')}`);
+        
+        for (const duplicate of duplicatesWithoutCode) {
+          try {
+            console.log(`🗑️ Deleting duplicate price rule: ${duplicate.id} ("${duplicate.title}")`);
+            await deletePriceRule(duplicate.id, shopDomain, apiToken, apiVersion);
+            console.log(`✅ Deleted duplicate price rule: ${duplicate.id}`);
+          } catch (error) {
+            console.error(`❌ Failed to delete duplicate price rule ${duplicate.id}:`, error);
+            // Continue with other duplicates even if one fails
+          }
+        }
+      }
     }
+    
+    // Use the price rule that has the discount code
+    const existingPriceRuleId = existingCode.price_rule_id;
+    
+    // Update existing price rule
+    console.log(`Updating existing discount code: ${code} (found by code)`);
     
     // Try to update - this will check if combines_with was applied
     const updateResult = await updatePriceRule(existingPriceRuleId, discountAmountCents, collectionId, shopDomain, apiToken, apiVersion);
@@ -825,15 +856,124 @@ async function createOrUpdateDiscountCode({
       }
     }
     
-    // If we found by title but not by code, check if the discount code exists
-    if (!existingCode && existingByTitle) {
-      // Check if discount code already exists for this price rule
-      const codeForRule = await getDiscountCodeForPriceRule(existingPriceRuleId, code, shopDomain, apiToken, apiVersion);
-      if (!codeForRule) {
-        // Code doesn't exist, create it
-        console.log(`Creating discount code ${code} for existing price rule`);
-        await createDiscountCodeForPriceRule(existingPriceRuleId, code, shopDomain, apiToken, apiVersion);
+    // Discount code already exists, no need to create it
+    console.log(`✅ Discount code ${code} already exists for price rule ${existingPriceRuleId}`);
+    return; // Exit early - we're done
+  }
+  
+  // Discount code doesn't exist - check if price rules with the same title exist (to catch duplicates)
+  // Only check for "Bundle Discount" duplicates
+  const discountTitle = `Bundle Discount - ${collectionTitle} - ${tier.quantity}-Pack`;
+  const existingByTitle = await findExistingPriceRuleByTitle(
+    discountTitle,
+    shopDomain,
+    apiToken,
+    apiVersion
+  );
+
+  // Handle duplicates: if multiple price rules exist with same title, clean them up
+  // Only process "Bundle Discount" duplicates
+  // Logic matches test-duplicate-cleanup.js:
+  // - Filter to only "Bundle Discount" duplicates
+  // - Check which ones have discount codes
+  // - Keep the one with code (or first one if none have codes)
+  // - Delete all others
+  if (existingByTitle && existingByTitle.allMatches && existingByTitle.allMatches.length > 1) {
+    // Filter to only "Bundle Discount" duplicates
+    const bundleDiscountDuplicates = existingByTitle.allMatches.filter(pr => 
+      pr.title && pr.title.startsWith('Bundle Discount')
+    );
+    
+    if (bundleDiscountDuplicates.length > 1) {
+      console.warn(`⚠️ Found ${bundleDiscountDuplicates.length} duplicate "Bundle Discount" price rules with same title`);
+      console.warn(`⚠️ Price rule IDs: ${bundleDiscountDuplicates.map(r => r.id).join(', ')}`);
+      
+      // Check which ones have discount codes (check for our specific code)
+      const priceRulesWithCodes = [];
+      const priceRulesWithoutCodes = [];
+      
+      for (const priceRule of bundleDiscountDuplicates) {
+        const codeForRule = await getDiscountCodeForPriceRule(priceRule.id, code, shopDomain, apiToken, apiVersion);
+        // Also check if it has any discount codes at all (matches test script logic)
+        const allCodes = await getAllDiscountCodesForPriceRule(priceRule.id, shopDomain, apiToken, apiVersion);
+        const hasAnyCode = allCodes && allCodes.length > 0;
+        
+        if (codeForRule || hasAnyCode) {
+          priceRulesWithCodes.push(priceRule);
+        } else {
+          priceRulesWithoutCodes.push(priceRule);
+        }
+        
+        // Small delay to respect rate limits
+        await new Promise(resolve => setTimeout(resolve, 50));
       }
+      
+      // Prefer the one with the discount code, or the first one if none have codes
+      // This matches test-duplicate-cleanup.js logic exactly
+      const primaryPriceRule = priceRulesWithCodes.length > 0 
+        ? priceRulesWithCodes[0] 
+        : bundleDiscountDuplicates[0];
+      const duplicatePriceRules = bundleDiscountDuplicates.filter(pr => pr.id !== primaryPriceRule.id);
+      
+      console.log(`✅ Using primary price rule: ${primaryPriceRule.id} (has code: ${priceRulesWithCodes.length > 0})`);
+      
+      // Delete duplicate price rules (the ones without codes or extra ones)
+      // Only delete "Bundle Discount" duplicates
+      for (const duplicate of duplicatePriceRules) {
+        // Double-check it's a "Bundle Discount" rule before deleting
+        if (duplicate.title && duplicate.title.startsWith('Bundle Discount')) {
+          try {
+            console.log(`🗑️ Deleting duplicate "Bundle Discount" price rule: ${duplicate.id} ("${duplicate.title}")`);
+            await deletePriceRule(duplicate.id, shopDomain, apiToken, apiVersion);
+            console.log(`✅ Deleted duplicate price rule: ${duplicate.id}`);
+          } catch (error) {
+            console.error(`❌ Failed to delete duplicate price rule ${duplicate.id}:`, error);
+            // Continue with other duplicates even if one fails
+          }
+        }
+      }
+      
+      // Update existingByTitle to point to the primary rule
+      existingByTitle.id = primaryPriceRule.id;
+      existingByTitle.allMatches = [primaryPriceRule];
+    }
+  }
+
+  // Use existing price rule if found by title (but no discount code exists yet)
+  const existingPriceRuleId = existingByTitle?.id;
+  
+  if (existingPriceRuleId) {
+    // Update existing price rule
+    console.log(`Updating existing price rule for ${tier.quantity}-pack (found by title, code: ${code})`);
+    
+    // Try to update - this will check if combines_with was applied
+    const updateResult = await updatePriceRule(existingPriceRuleId, discountAmountCents, collectionId, shopDomain, apiToken, apiVersion);
+    
+    // If combines_with was not applied, we need to recreate the price rule
+    // (Shopify REST API doesn't support updating combines_with on existing rules)
+    if (updateResult && updateResult.combines_with_missing) {
+      console.warn(`⚠️ WARNING: combines_with property was not applied to existing price rule ${existingPriceRuleId}`);
+      console.warn(`⚠️ Shopify REST API doesn't support updating combines_with on existing price rules`);
+      console.warn(`⚠️ To fix this, you need to manually enable combinations in Shopify Admin, or delete and recreate the discount`);
+      console.warn(`⚠️ Manual fix: Go to Shopify Admin → Discounts → ${code} → Combinations → Enable all checkboxes`);
+      
+      // Optionally: Auto-recreate if enabled (disabled by default for safety)
+      const autoRecreate = process.env.AUTO_RECREATE_FOR_COMBINES_WITH === 'true';
+      if (autoRecreate) {
+        console.log(`🔄 Auto-recreate enabled - deleting and recreating price rule to set combines_with...`);
+        // TODO: Implement delete and recreate logic here if needed
+        // For now, just log the warning
+      }
+    }
+    
+    // Check if discount code already exists for this price rule
+    const codeForRule = await getDiscountCodeForPriceRule(existingPriceRuleId, code, shopDomain, apiToken, apiVersion);
+    if (!codeForRule) {
+      // Code doesn't exist, create it
+      console.log(`Creating discount code ${code} for existing price rule ${existingPriceRuleId}`);
+      await createDiscountCodeForPriceRule(existingPriceRuleId, code, shopDomain, apiToken, apiVersion);
+    } else {
+      console.log(`✅ Discount code ${code} already exists for price rule ${existingPriceRuleId}`);
     }
   } else {
     // Create new price rule and discount code
@@ -853,28 +993,54 @@ async function createOrUpdateDiscountCode({
 
 /**
  * Find existing discount code by exact code match
+ * Handles pagination to check ALL price rules (not just first 250)
  */
 async function findExistingDiscountCode(code, shopDomain, apiToken, apiVersion) {
   try {
-    // Get all price rules
-    const response = await fetch(
-      `https://${shopDomain}/admin/api/${apiVersion}/price_rules.json?limit=250`,
-      {
+    let pageInfo = { hasNextPage: true, nextPageUrl: null };
+    let allPriceRules = [];
+    
+    // Fetch all price rules with pagination
+    while (pageInfo.hasNextPage) {
+      const url = pageInfo.nextPageUrl || 
+        `https://${shopDomain}/admin/api/${apiVersion}/price_rules.json?limit=250`;
+      
+      const response = await fetch(url, {
         headers: {
           'Content-Type': 'application/json',
           'X-Shopify-Access-Token': apiToken
         }
+      });
+
+      if (!response.ok) {
+        console.warn(`Failed to fetch price rules page: ${response.status}`);
+        break;
       }
-    );
 
-    if (!response.ok) {
-      return null;
+      const data = await response.json();
+      const priceRules = data.price_rules || [];
+      allPriceRules = allPriceRules.concat(priceRules);
+      
+      // Check for pagination
+      const linkHeader = response.headers.get('Link');
+      if (linkHeader && linkHeader.includes('rel="next"')) {
+        const nextMatch = linkHeader.match(/<([^>]+)>;\s*rel="next"/);
+        pageInfo.nextPageUrl = nextMatch ? nextMatch[1] : null;
+        pageInfo.hasNextPage = !!pageInfo.nextPageUrl;
+      } else {
+        pageInfo.hasNextPage = false;
+      }
+      
+      // Add small delay to respect rate limits
+      if (pageInfo.hasNextPage) {
+        await new Promise(resolve => setTimeout(resolve, 200));
+      }
     }
-
-    const data = await response.json();
+    
+    console.log(`Checking ${allPriceRules.length} price rules for discount code: ${code}`);
     
     // Find price rule with matching discount code
-    for (const priceRule of data.price_rules || []) {
+    for (const priceRule of allPriceRules) {
       const codesResponse = await fetch(
         `https://${shopDomain}/admin/api/${apiVersion}/price_rules/${priceRule.id}/discount_codes.json`,
         {
@@ -890,12 +1056,16 @@ async function findExistingDiscountCode(code, shopDomain, apiToken, apiVersion) 
         const matchingCode = codesData.discount_codes?.find(dc => dc.code === code);
         
         if (matchingCode) {
-          console.log(`Found existing discount code: ${code} in price rule ${priceRule.id}`);
+          console.log(`✅ Found existing discount code: ${code} in price rule ${priceRule.id}`);
           return { ...matchingCode, price_rule_id: priceRule.id };
         }
       }
+      
+      // Add small delay between discount code checks to respect rate limits
+      await new Promise(resolve => setTimeout(resolve, 50));
     }
 
+    console.log(`No existing discount code found: ${code}`);
     return null;
   } catch (error) {
     console.error('Error finding existing discount code:', error);
@@ -905,44 +1075,75 @@ async function findExistingDiscountCode(code, shopDomain, apiToken, apiVersion) 
 
 /**
  * Find existing price rule by exact title match (to prevent duplicates)
- * Returns the first matching rule, but logs if duplicates are found
+ * Handles pagination to check ALL price rules (not just first 250)
+ * Returns the first matching rule, but includes allMatches array if duplicates exist
  */
 async function findExistingPriceRuleByTitle(title, shopDomain, apiToken, apiVersion) {
   try {
-    const response = await fetch(
-      `https://${shopDomain}/admin/api/${apiVersion}/price_rules.json?limit=250`,
-      {
+    let pageInfo = { hasNextPage: true, nextPageUrl: null };
+    let allPriceRules = [];
+    
+    // Fetch all price rules with pagination
+    while (pageInfo.hasNextPage) {
+      const url = pageInfo.nextPageUrl || 
+        `https://${shopDomain}/admin/api/${apiVersion}/price_rules.json?limit=250`;
+      
+      const response = await fetch(url, {
         headers: {
           'Content-Type': 'application/json',
           'X-Shopify-Access-Token': apiToken
         }
+      });
+
+      if (!response.ok) {
+        console.warn(`Failed to fetch price rules page: ${response.status}`);
+        break;
       }
-    );
 
-    if (!response.ok) {
-      return null;
+      const data = await response.json();
+      const priceRules = data.price_rules || [];
+      allPriceRules = allPriceRules.concat(priceRules);
+      
+      // Check for pagination
+      const linkHeader = response.headers.get('Link');
+      if (linkHeader && linkHeader.includes('rel="next"')) {
+        const nextMatch = linkHeader.match(/<([^>]+)>;\s*rel="next"/);
+        pageInfo.nextPageUrl = nextMatch ? nextMatch[1] : null;
+        pageInfo.hasNextPage = !!pageInfo.nextPageUrl;
+      } else {
+        pageInfo.hasNextPage = false;
+      }
+      
+      // Add small delay to respect rate limits
+      if (pageInfo.hasNextPage) {
+        await new Promise(resolve => setTimeout(resolve, 200));
+      }
     }
-
-    const data = await response.json();
+    
+    console.log(`Checking ${allPriceRules.length} price rules for title: "${title}"`);
     
     // Find ALL price rules with exact title match (to detect duplicates)
-    const matchingRules = data.price_rules?.filter(pr => pr.title === title) || [];
+    const matchingRules = allPriceRules.filter(pr => pr.title === title);
     
     if (matchingRules.length === 0) {
+      console.log(`No existing price rule found with title: "${title}"`);
       return null;
     }
     
-    // If multiple matches found, log warning and prefer the first one
+    // If multiple matches found, log warning and include all matches
     if (matchingRules.length > 1) {
       console.warn(`⚠️ WARNING: Found ${matchingRules.length} duplicate price rules with title: "${title}"`);
       console.warn(`⚠️ Price rule IDs: ${matchingRules.map(r => r.id).join(', ')}`);
-      console.warn(`⚠️ The function will update the first one (ID: ${matchingRules[0].id})`);
-      console.warn(`⚠️ Please manually delete the duplicate(s) from Shopify Admin`);
     }
     
-    // Return the first matching rule
-    console.log(`Found existing price rule by title: ${title} (ID: ${matchingRules[0].id})`);
-    return matchingRules[0];
+    // Return the first matching rule, but include allMatches array for duplicate handling
+    const result = { ...matchingRules[0] };
+    if (matchingRules.length > 1) {
+      result.allMatches = matchingRules;
+    }
+    
+    console.log(`✅ Found existing price rule by title: "${title}" (ID: ${result.id})`);
+    return result;
   } catch (error) {
     console.error('Error finding existing price rule by title:', error);
     return null;
@@ -950,7 +1151,7 @@ async function findExistingPriceRuleByTitle(title, shopDomain, apiToken, apiVers
 }
 
 /**
- * Get discount code for a specific price rule
+ * Get discount code for a specific price rule (by code)
  */
 async function getDiscountCodeForPriceRule(priceRuleId, code, shopDomain, apiToken, apiVersion) {
   try {
@@ -973,6 +1174,70 @@ async function getDiscountCodeForPriceRule(priceRuleId, code, shopDomain, apiTok
   } catch (error) {
     console.error('Error getting discount code for price rule:', error);
     return null;
+  }
+}
+
+/**
+ * Get all discount codes for a price rule
+ * Used to check if a price rule has any discount codes at all
+ */
+async function getAllDiscountCodesForPriceRule(priceRuleId, shopDomain, apiToken, apiVersion) {
+  try {
+    const response = await fetch(
+      `https://${shopDomain}/admin/api/${apiVersion}/price_rules/${priceRuleId}/discount_codes.json`,
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': apiToken
+        }
+      }
+    );
+
+    if (!response.ok) {
+      return [];
+    }
+
+    const data = await response.json();
+    return data.discount_codes || [];
+  } catch (error) {
+    console.error('Error getting all discount codes for price rule:', error);
+    return [];
+  }
+}
+
+/**
+ * Delete a price rule (and its discount codes)
+ */
+async function deletePriceRule(priceRuleId, shopDomain, apiToken, apiVersion) {
+  try {
+    // Add delay before deleting (rate limit: 2 calls/second)
+    console.log('Waiting 1000ms before deleting price rule to respect rate limits...');
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    
+    const response = await fetch(
+      `https://${shopDomain}/admin/api/${apiVersion}/price_rules/${priceRuleId}.json`,
+      {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': apiToken
+        }
+      }
+    );
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      if (response.status === 429) {
+        throw new Error(`Rate limited: Too many API requests. Please wait and try again. Error: ${JSON.stringify(errorData)}`);
+      }
+      throw new Error(`Failed to delete price rule: ${response.statusText} - ${JSON.stringify(errorData)}`);
+    }
+
+    console.log(`✅ Deleted price rule ${priceRuleId}`);
+    return true;
+  } catch (error) {
+    console.error(`Error deleting price rule ${priceRuleId}:`, error);
+    throw error;
   }
 }
 
