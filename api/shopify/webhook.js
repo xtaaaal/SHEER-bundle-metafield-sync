@@ -589,25 +589,8 @@ async function createOrUpdateDiscountCode({
       console.log(`Updating existing price rule for ${tier.quantity}-pack (found by title, code: ${code})`);
     }
     
-    // Try to update - this will check if combines_with was applied
-    const updateResult = await updatePriceRule(existingPriceRuleId, discountAmountCents, collectionId, shopDomain, apiToken, apiVersion);
-    
-    // If combines_with was not applied, we need to recreate the price rule
-    // (Shopify REST API doesn't support updating combines_with on existing rules)
-    if (updateResult && updateResult.combines_with_missing) {
-      console.warn(`⚠️ WARNING: combines_with property was not applied to existing price rule ${existingPriceRuleId}`);
-      console.warn(`⚠️ Shopify REST API doesn't support updating combines_with on existing price rules`);
-      console.warn(`⚠️ To fix this, you need to manually enable combinations in Shopify Admin, or delete and recreate the discount`);
-      console.warn(`⚠️ Manual fix: Go to Shopify Admin → Discounts → ${code} → Combinations → Enable all checkboxes`);
-      
-      // Optionally: Auto-recreate if enabled (disabled by default for safety)
-      const autoRecreate = process.env.AUTO_RECREATE_FOR_COMBINES_WITH === 'true';
-      if (autoRecreate) {
-        console.log(`🔄 Auto-recreate enabled - deleting and recreating price rule to set combines_with...`);
-        // TODO: Implement delete and recreate logic here if needed
-        // For now, just log the warning
-      }
-    }
+    // Update the price rule
+    await updatePriceRule(existingPriceRuleId, discountAmountCents, collectionId, shopDomain, apiToken, apiVersion);
     
     // If we found by title but not by code, check if the discount code exists
     if (!existingCode && existingByTitle) {
@@ -650,16 +633,20 @@ async function createOrUpdateDiscountCode({
           // Check if it has any codes at all
           const duplicateAllCodes = await getAllDiscountCodesForPriceRule(duplicateRule.id, shopDomain, apiToken, apiVersion);
           if (duplicateAllCodes.length === 0) {
-            // This duplicate has no codes - add the code to it
-            console.log(`⚠️ Found duplicate price rule ${duplicateRule.id} with no discount codes. Adding code ${code}...`);
+            // This duplicate has no codes - try to add the code to it
+            // But if the code already exists on another price rule, we can't add it (Shopify requires unique codes)
+            // So we should delete this orphaned duplicate instead
+            console.log(`⚠️ Found duplicate price rule ${duplicateRule.id} with no discount codes.`);
+            console.log(`⚠️ Since discount code ${code} already exists on price rule ${existingPriceRuleId}, we cannot add it to this duplicate.`);
+            console.log(`⚠️ Deleting orphaned duplicate price rule ${duplicateRule.id}...`);
             try {
               // Add delay to respect rate limits
               await new Promise(resolve => setTimeout(resolve, 1000));
-              await createDiscountCodeForPriceRule(duplicateRule.id, code, shopDomain, apiToken, apiVersion);
-              console.log(`✅ Added discount code ${code} to duplicate price rule ${duplicateRule.id}`);
+              await deletePriceRule(duplicateRule.id, shopDomain, apiToken, apiVersion);
+              console.log(`✅ Deleted orphaned duplicate price rule ${duplicateRule.id}`);
             } catch (error) {
-              console.error(`⚠️ Failed to add discount code ${code} to duplicate price rule ${duplicateRule.id}:`, error.message);
-              console.error(`⚠️ This may be due to rate limiting. The code will be added on the next webhook run.`);
+              console.error(`⚠️ Failed to delete duplicate price rule ${duplicateRule.id}:`, error.message);
+              console.error(`⚠️ Please manually delete this duplicate from Shopify Admin.`);
             }
           } else {
             console.log(`Duplicate price rule ${duplicateRule.id} has ${duplicateAllCodes.length} code(s) but not ${code}. Skipping.`);
@@ -820,6 +807,35 @@ async function getDiscountCodeForPriceRule(priceRuleId, code, shopDomain, apiTok
 }
 
 /**
+ * Delete a price rule
+ */
+async function deletePriceRule(priceRuleId, shopDomain, apiToken, apiVersion) {
+  try {
+    const response = await fetch(
+      `https://${shopDomain}/admin/api/${apiVersion}/price_rules/${priceRuleId}.json`,
+      {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': apiToken
+        }
+      }
+    );
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(`Failed to delete price rule: ${response.statusText} - ${JSON.stringify(errorData)}`);
+    }
+
+    console.log(`✅ Successfully deleted price rule ${priceRuleId}`);
+    return true;
+  } catch (error) {
+    console.error('Error deleting price rule:', error);
+    throw error;
+  }
+}
+
+/**
  * Get all discount codes for a specific price rule
  */
 async function getAllDiscountCodesForPriceRule(priceRuleId, shopDomain, apiToken, apiVersion) {
@@ -952,12 +968,8 @@ async function createNewDiscountCode({
           ends_at: null,
           usage_limit: null,
           once_per_customer: false,
-          entitled_collection_ids: [parseInt(collectionId)], // CRITICAL: Apply discount only to products in this specific sibling collection (not all products)
-          combines_with: {
-            order_discounts: true, // Allow combining with other order-level discounts (e.g., FW25-950OFF-6000)
-            product_discounts: true, // Allow combining with product discounts
-            shipping_discounts: true // Allow combining with shipping discounts
-          }
+          entitled_collection_ids: [parseInt(collectionId)] // CRITICAL: Apply discount only to products in this specific sibling collection (not all products)
+          // Note: combines_with must be set manually in Shopify Admin
         }
       })
     }
@@ -978,27 +990,8 @@ async function createNewDiscountCode({
     throw new Error('Failed to get price rule ID from response');
   }
   
-  // Verify that combines_with was set in the created price rule
-  if (priceRuleData.price_rule?.combines_with) {
-    const combinesWith = priceRuleData.price_rule.combines_with;
-    console.log('✅ Price rule created with combines_with enabled:', {
-      order_discounts: combinesWith.order_discounts,
-      product_discounts: combinesWith.product_discounts,
-      shipping_discounts: combinesWith.shipping_discounts
-    });
-    
-    // Check if all three are actually true
-    if (!combinesWith.product_discounts || !combinesWith.order_discounts || !combinesWith.shipping_discounts) {
-      console.warn('⚠️ WARNING: combines_with was set but not all values are true!');
-      console.warn('⚠️ Expected: all true, but got:', combinesWith);
-      console.warn('⚠️ This may indicate the API did not accept all combination settings.');
-    }
-  } else {
-    console.error('❌ ERROR: Price rule created but combines_with property was not returned in response');
-    console.error('❌ This means the property was NOT applied by Shopify API');
-    console.error('❌ Full response:', JSON.stringify(priceRuleData, null, 2));
-    console.error('❌ You may need to manually enable combinations in Shopify Admin');
-  }
+  console.log(`✅ Price rule created: ${priceRuleId}`);
+  console.log(`ℹ️ Note: combines_with must be set manually in Shopify Admin`);
 
   // Add delay before creating discount code (rate limit: 2 calls/second)
   // Using 1000ms to be safe and stay well under the limit
@@ -1072,7 +1065,6 @@ async function updatePriceRule(priceRuleId, discountAmountCents, collectionId, s
     if (getResponse.ok) {
       const getData = await getResponse.json();
       existingRule = getData.price_rule;
-      console.log('Fetched existing price rule. Current combines_with:', existingRule?.combines_with);
     } else {
       console.warn('Could not fetch existing price rule, proceeding with partial update');
     }
@@ -1085,12 +1077,8 @@ async function updatePriceRule(priceRuleId, discountAmountCents, collectionId, s
     price_rule: {
       value: `-${discountAmountDollars}`, // Convert cents to dollars for API
       target_selection: 'entitled', // 'entitled' with entitled_collection_ids = "Amount off products" applied to specific collection
-      entitled_collection_ids: [parseInt(collectionId)], // CRITICAL: Ensure discount applies only to products in sibling collection (not all products)
-      combines_with: {
-        order_discounts: true, // Allow combining with other order-level discounts (e.g., FW25-950OFF-6000)
-        product_discounts: true, // Allow combining with product discounts
-        shipping_discounts: true // Allow combining with shipping discounts
-      }
+      entitled_collection_ids: [parseInt(collectionId)] // CRITICAL: Ensure discount applies only to products in sibling collection (not all products)
+      // Note: combines_with must be set manually in Shopify Admin
     }
   };
   
@@ -1108,9 +1096,9 @@ async function updatePriceRule(priceRuleId, discountAmountCents, collectionId, s
     if (existingRule.once_per_customer !== undefined) updatePayload.price_rule.once_per_customer = existingRule.once_per_customer;
   }
   
-  console.log('Updating price rule with combines_with enabled:', JSON.stringify(updatePayload, null, 2));
+  console.log('Updating price rule:', JSON.stringify(updatePayload, null, 2));
   
-  // Update both discount amount, collection targeting, and discount combinations
+  // Update discount amount and collection targeting
   const response = await fetch(
     `https://${shopDomain}/admin/api/${apiVersion}/price_rules/${priceRuleId}.json`,
     {
@@ -1129,36 +1117,7 @@ async function updatePriceRule(priceRuleId, discountAmountCents, collectionId, s
     throw new Error(`Failed to update price rule: ${response.statusText} - ${JSON.stringify(errorData)}`);
   }
 
-  const updatedRule = await response.json().catch(() => ({}));
-  
-  // Verify that combines_with was actually applied
-  if (updatedRule.price_rule?.combines_with) {
-    const combinesWith = updatedRule.price_rule.combines_with;
-    console.log(`✅ Updated price rule: ${priceRuleId} with collection targeting and discount combinations enabled`);
-    console.log('✅ combines_with verified:', {
-      order_discounts: combinesWith.order_discounts,
-      product_discounts: combinesWith.product_discounts,
-      shipping_discounts: combinesWith.shipping_discounts
-    });
-    
-    // Check if all three are actually true
-    if (!combinesWith.product_discounts || !combinesWith.order_discounts || !combinesWith.shipping_discounts) {
-      console.error('❌ ERROR: combines_with was updated but not all values are true!');
-      console.error('❌ Expected: all true, but got:', combinesWith);
-      console.error('❌ This indicates the API did not accept all combination settings.');
-      console.error('❌ You may need to manually enable combinations in Shopify Admin.');
-    }
-  } else {
-    console.error(`❌ ERROR: Price rule ${priceRuleId} was updated but combines_with property was not returned in response`);
-    console.error('❌ This means the property was NOT applied by Shopify API');
-    console.error('❌ Full response:', JSON.stringify(updatedRule, null, 2));
-    console.error('❌ You need to manually enable combinations in Shopify Admin for this discount.');
-    
-    // Return a flag indicating combines_with is missing
-    return { combines_with_missing: true };
-  }
-  
-  // Return success if combines_with was applied
-  return { combines_with_missing: false };
+  console.log(`✅ Updated price rule: ${priceRuleId} with collection targeting`);
+  console.log(`ℹ️ Note: combines_with must be set manually in Shopify Admin`);
 }
 
