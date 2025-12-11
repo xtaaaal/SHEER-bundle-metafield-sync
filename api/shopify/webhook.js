@@ -150,7 +150,9 @@ export default async function handler(req, res) {
       });
       
       // Sync product price to bundle collections
-      await syncProductPriceToBundleCollections(productId, productPrice, shopDomain, apiToken, apiVersion);
+      // Removed: syncProductPriceToBundleCollections to reduce API calls
+      // The bundle_base_product_price metafield should be set manually in Shopify admin
+      // await syncProductPriceToBundleCollections(productId, productPrice, shopDomain, apiToken, apiVersion);
       
       return res.status(200).json({ 
         success: true, 
@@ -351,8 +353,16 @@ async function getCollectionBundleData(collectionId, shopDomain, apiToken, apiVe
  * Sync product price to bundle collections when product is updated
  * Finds all collections containing this product that have bundle enabled,
  * and updates their bundle_base_product_price metafield
+ * 
+ * DISABLED: This function has been disabled to reduce API calls.
+ * The bundle_base_product_price metafield should be set manually in Shopify admin.
  */
 async function syncProductPriceToBundleCollections(productId, productPrice, shopDomain, apiToken, apiVersion) {
+  // Function disabled to reduce API calls
+  console.log('syncProductPriceToBundleCollections is disabled to reduce API calls');
+  return;
+  
+  /* DISABLED CODE - KEPT FOR REFERENCE
   try {
     console.log(`Syncing product price $${productPrice} to bundle collections for product ${productId}...`);
     
@@ -568,6 +578,7 @@ async function syncProductPriceToBundleCollections(productId, productPrice, shop
     console.error('Error syncing product price to bundle collections:', error);
     throw error;
   }
+  */
 }
 
 /**
