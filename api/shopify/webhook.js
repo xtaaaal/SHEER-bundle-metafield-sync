@@ -150,9 +150,7 @@ export default async function handler(req, res) {
       });
       
       // Sync product price to bundle collections
-      // Removed: syncProductPriceToBundleCollections to reduce API calls
-      // The bundle_base_product_price metafield should be set manually in Shopify admin
-      // await syncProductPriceToBundleCollections(productId, productPrice, shopDomain, apiToken, apiVersion);
+      await syncProductPriceToBundleCollections(productId, productPrice, shopDomain, apiToken, apiVersion);
       
       return res.status(200).json({ 
         success: true, 
@@ -353,16 +351,8 @@ async function getCollectionBundleData(collectionId, shopDomain, apiToken, apiVe
  * Sync product price to bundle collections when product is updated
  * Finds all collections containing this product that have bundle enabled,
  * and updates their bundle_base_product_price metafield
- * 
- * DISABLED: This function has been disabled to reduce API calls.
- * The bundle_base_product_price metafield should be set manually in Shopify admin.
  */
 async function syncProductPriceToBundleCollections(productId, productPrice, shopDomain, apiToken, apiVersion) {
-  // Function disabled to reduce API calls
-  console.log('syncProductPriceToBundleCollections is disabled to reduce API calls');
-  return;
-  
-  /* DISABLED CODE - KEPT FOR REFERENCE
   try {
     console.log(`Syncing product price $${productPrice} to bundle collections for product ${productId}...`);
     
@@ -578,7 +568,6 @@ async function syncProductPriceToBundleCollections(productId, productPrice, shop
     console.error('Error syncing product price to bundle collections:', error);
     throw error;
   }
-  */
 }
 
 /**
@@ -715,15 +704,14 @@ async function processBundleDiscountCodes(collectionId, webhookData = {}) {
 
     try {
       // Add delay before processing each tier (including first one after GraphQL query)
-      // 2000ms delay = 0.5 calls per second (safely under 2 calls/second limit)
-      // Increased to avoid rate limiting issues
+      // 1000ms delay = exactly 1 call per second (safely under 2 calls/second limit)
       if (i > 0) {
-        console.log(`Waiting 2000ms before processing tier ${tier.quantity}...`);
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        console.log(`Waiting 1000ms before processing tier ${tier.quantity}...`);
+        await new Promise(resolve => setTimeout(resolve, 1000));
       } else {
         // Add delay even for first tier to ensure rate limit is respected after GraphQL query
-        console.log(`Waiting 2000ms before processing first tier ${tier.quantity}...`);
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        console.log(`Waiting 1000ms before processing first tier ${tier.quantity}...`);
+        await new Promise(resolve => setTimeout(resolve, 1000));
       }
       
       await createOrUpdateDiscountCode({
@@ -743,8 +731,8 @@ async function processBundleDiscountCodes(collectionId, webhookData = {}) {
       // Continue with other tiers even if one fails
       // Add delay even on error to respect rate limits
       if (i < bundleTiers.length - 1) {
-        console.log(`Waiting 2000ms after error before processing next tier...`);
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        console.log(`Waiting 1000ms after error before processing next tier...`);
+        await new Promise(resolve => setTimeout(resolve, 1000));
       }
     }
   }
@@ -795,168 +783,27 @@ async function createOrUpdateDiscountCode({
   
   const code = `BDL-${tier.quantity}P-${bundleGroupIdFormatted}`;
 
-  // Check if discount code already exists (by exact code match) - this is the PRIMARY check
+  // Check if discount code already exists (by exact code match)
   const existingCode = await findExistingDiscountCode(code, shopDomain, apiToken, apiVersion);
   
-  // If discount code exists, use that price rule (prevent duplicates)
-  if (existingCode) {
-    console.log(`✅ Found existing discount code: ${code} on price rule ${existingCode.price_rule_id}`);
-    console.log(`✅ Will update existing price rule to prevent duplicates`);
-    
-    // Also check if there are other price rules with the same title (duplicates)
-    // Only check for "Bundle Discount" duplicates
-    const discountTitle = `Bundle Discount - ${collectionTitle} - ${tier.quantity}-Pack`;
-    const existingByTitle = await findExistingPriceRuleByTitle(
-      discountTitle,
-      shopDomain,
-      apiToken,
-      apiVersion
-    );
-    
-    // If we found duplicates by title, delete the ones that don't have our discount code
-    // Only delete if title starts with "Bundle Discount"
-    if (existingByTitle && existingByTitle.allMatches && existingByTitle.allMatches.length > 1) {
-      // Filter to only "Bundle Discount" duplicates
-      const bundleDiscountDuplicates = existingByTitle.allMatches.filter(pr => 
-        pr.title && pr.title.startsWith('Bundle Discount')
-      );
-      
-      const duplicatesWithoutCode = bundleDiscountDuplicates.filter(pr => 
-        pr.id !== existingCode.price_rule_id
-      );
-      
-      if (duplicatesWithoutCode.length > 0) {
-        console.warn(`⚠️ Found ${duplicatesWithoutCode.length} duplicate "Bundle Discount" price rules without discount code`);
-        console.warn(`⚠️ Deleting duplicates: ${duplicatesWithoutCode.map(r => r.id).join(', ')}`);
-        
-        for (const duplicate of duplicatesWithoutCode) {
-          try {
-            console.log(`🗑️ Deleting duplicate price rule: ${duplicate.id} ("${duplicate.title}")`);
-            await deletePriceRule(duplicate.id, shopDomain, apiToken, apiVersion);
-            console.log(`✅ Deleted duplicate price rule: ${duplicate.id}`);
-          } catch (error) {
-            console.error(`❌ Failed to delete duplicate price rule ${duplicate.id}:`, error);
-            // Continue with other duplicates even if one fails
-          }
-        }
-      }
-    }
-    
-    // Use the price rule that has the discount code
-    const existingPriceRuleId = existingCode.price_rule_id;
-    
-    // Update existing price rule
-    console.log(`Updating existing discount code: ${code} (found by code)`);
-    
-    // Try to update - this will check if combines_with was applied
-    const updateResult = await updatePriceRule(existingPriceRuleId, discountAmountCents, collectionId, shopDomain, apiToken, apiVersion);
-    
-    // If combines_with was not applied, we need to recreate the price rule
-    // (Shopify REST API doesn't support updating combines_with on existing rules)
-    if (updateResult && updateResult.combines_with_missing) {
-      console.warn(`⚠️ WARNING: combines_with property was not applied to existing price rule ${existingPriceRuleId}`);
-      console.warn(`⚠️ Shopify REST API doesn't support updating combines_with on existing price rules`);
-      console.warn(`⚠️ To fix this, you need to manually enable combinations in Shopify Admin, or delete and recreate the discount`);
-      console.warn(`⚠️ Manual fix: Go to Shopify Admin → Discounts → ${code} → Combinations → Enable all checkboxes`);
-      
-      // Optionally: Auto-recreate if enabled (disabled by default for safety)
-      const autoRecreate = process.env.AUTO_RECREATE_FOR_COMBINES_WITH === 'true';
-      if (autoRecreate) {
-        console.log(`🔄 Auto-recreate enabled - deleting and recreating price rule to set combines_with...`);
-        // TODO: Implement delete and recreate logic here if needed
-        // For now, just log the warning
-      }
-    }
-    
-    // Discount code already exists, no need to create it
-    console.log(`✅ Discount code ${code} already exists for price rule ${existingPriceRuleId}`);
-    return; // Exit early - we're done
-  }
-  
-  // Discount code doesn't exist - check if price rules with the same title exist (to catch duplicates)
-  // Only check for "Bundle Discount" duplicates
-  const discountTitle = `Bundle Discount - ${collectionTitle} - ${tier.quantity}-Pack`;
+  // Also check if a price rule with the same title exists (to catch duplicates)
   const existingByTitle = await findExistingPriceRuleByTitle(
-    discountTitle,
+    `Bundle Discount - ${collectionTitle} - ${tier.quantity}-Pack`,
     shopDomain,
     apiToken,
     apiVersion
   );
 
-  // Handle duplicates: if multiple price rules exist with same title, clean them up
-  // Only process "Bundle Discount" duplicates
-  // Logic matches test-duplicate-cleanup.js:
-  // - Filter to only "Bundle Discount" duplicates
-  // - Check which ones have discount codes
-  // - Keep the one with code (or first one if none have codes)
-  // - Delete all others
-  if (existingByTitle && existingByTitle.allMatches && existingByTitle.allMatches.length > 1) {
-    // Filter to only "Bundle Discount" duplicates
-    const bundleDiscountDuplicates = existingByTitle.allMatches.filter(pr => 
-      pr.title && pr.title.startsWith('Bundle Discount')
-    );
-    
-    if (bundleDiscountDuplicates.length > 1) {
-      console.warn(`⚠️ Found ${bundleDiscountDuplicates.length} duplicate "Bundle Discount" price rules with same title`);
-      console.warn(`⚠️ Price rule IDs: ${bundleDiscountDuplicates.map(r => r.id).join(', ')}`);
-      
-      // Check which ones have discount codes (check for our specific code)
-      const priceRulesWithCodes = [];
-      const priceRulesWithoutCodes = [];
-      
-      for (const priceRule of bundleDiscountDuplicates) {
-        const codeForRule = await getDiscountCodeForPriceRule(priceRule.id, code, shopDomain, apiToken, apiVersion);
-        // Also check if it has any discount codes at all (matches test script logic)
-        const allCodes = await getAllDiscountCodesForPriceRule(priceRule.id, shopDomain, apiToken, apiVersion);
-        const hasAnyCode = allCodes && allCodes.length > 0;
-        
-        if (codeForRule || hasAnyCode) {
-          priceRulesWithCodes.push(priceRule);
-        } else {
-          priceRulesWithoutCodes.push(priceRule);
-        }
-        
-        // Small delay to respect rate limits
-        await new Promise(resolve => setTimeout(resolve, 50));
-      }
-      
-      // Prefer the one with the discount code, or the first one if none have codes
-      // This matches test-duplicate-cleanup.js logic exactly
-      const primaryPriceRule = priceRulesWithCodes.length > 0 
-        ? priceRulesWithCodes[0] 
-        : bundleDiscountDuplicates[0];
-      const duplicatePriceRules = bundleDiscountDuplicates.filter(pr => pr.id !== primaryPriceRule.id);
-      
-      console.log(`✅ Using primary price rule: ${primaryPriceRule.id} (has code: ${priceRulesWithCodes.length > 0})`);
-      
-      // Delete duplicate price rules (the ones without codes or extra ones)
-      // Only delete "Bundle Discount" duplicates
-      for (const duplicate of duplicatePriceRules) {
-        // Double-check it's a "Bundle Discount" rule before deleting
-        if (duplicate.title && duplicate.title.startsWith('Bundle Discount')) {
-          try {
-            console.log(`🗑️ Deleting duplicate "Bundle Discount" price rule: ${duplicate.id} ("${duplicate.title}")`);
-            await deletePriceRule(duplicate.id, shopDomain, apiToken, apiVersion);
-            console.log(`✅ Deleted duplicate price rule: ${duplicate.id}`);
-          } catch (error) {
-            console.error(`❌ Failed to delete duplicate price rule ${duplicate.id}:`, error);
-            // Continue with other duplicates even if one fails
-          }
-        }
-      }
-      
-      // Update existingByTitle to point to the primary rule
-      existingByTitle.id = primaryPriceRule.id;
-      existingByTitle.allMatches = [primaryPriceRule];
-    }
-  }
-
-  // Use existing price rule if found by title (but no discount code exists yet)
-  const existingPriceRuleId = existingByTitle?.id;
+  // Use existing price rule if found (either by code or by title)
+  const existingPriceRuleId = existingCode?.price_rule_id || existingByTitle?.id;
   
   if (existingPriceRuleId) {
     // Update existing price rule
-    console.log(`Updating existing price rule for ${tier.quantity}-pack (found by title, code: ${code})`);
+    if (existingCode) {
+      console.log(`Updating existing discount code: ${code} (found by code)`);
+    } else {
+      console.log(`Updating existing price rule for ${tier.quantity}-pack (found by title, code: ${code})`);
+    }
     
     // Try to update - this will check if combines_with was applied
     const updateResult = await updatePriceRule(existingPriceRuleId, discountAmountCents, collectionId, shopDomain, apiToken, apiVersion);
@@ -978,91 +825,56 @@ async function createOrUpdateDiscountCode({
       }
     }
     
-    // Check if discount code already exists for this price rule
-    const codeForRule = await getDiscountCodeForPriceRule(existingPriceRuleId, code, shopDomain, apiToken, apiVersion);
-    if (!codeForRule) {
-      // Code doesn't exist, create it
-      console.log(`Creating discount code ${code} for existing price rule ${existingPriceRuleId}`);
-      await createDiscountCodeForPriceRule(existingPriceRuleId, code, shopDomain, apiToken, apiVersion);
-    } else {
-      console.log(`✅ Discount code ${code} already exists for price rule ${existingPriceRuleId}`);
+    // If we found by title but not by code, check if the discount code exists
+    if (!existingCode && existingByTitle) {
+      // Check if discount code already exists for this price rule
+      const codeForRule = await getDiscountCodeForPriceRule(existingPriceRuleId, code, shopDomain, apiToken, apiVersion);
+      if (!codeForRule) {
+        // Code doesn't exist, create it
+        console.log(`Creating discount code ${code} for existing price rule`);
+        await createDiscountCodeForPriceRule(existingPriceRuleId, code, shopDomain, apiToken, apiVersion);
+      }
     }
   } else {
     // Create new price rule and discount code
     console.log(`Creating new discount code: ${code}`);
-    try {
-      await createNewDiscountCode({
-        code,
-        collectionTitle,
-        collectionId, // Pass collection ID
-        tier,
-        discountAmountCents,
-        shopDomain,
-        apiToken,
-        apiVersion
-      });
-    } catch (error) {
-      // If discount code creation fails, log error but don't throw
-      // The price rule was created, we can retry code creation later
-      console.error(`⚠️ Failed to create discount code ${code} for price rule. Price rule exists but has no code.`);
-      console.error(`⚠️ Error: ${error.message}`);
-      console.error(`⚠️ You may need to manually add the discount code "${code}" to the price rule in Shopify Admin.`);
-      // Don't throw - allow the function to complete
-      // The price rule exists, just without a code
-    }
+    await createNewDiscountCode({
+      code,
+      collectionTitle,
+      collectionId, // Pass collection ID
+      tier,
+      discountAmountCents,
+      shopDomain,
+      apiToken,
+      apiVersion
+    });
   }
 }
 
 /**
  * Find existing discount code by exact code match
- * Handles pagination to check ALL price rules (not just first 250)
  */
 async function findExistingDiscountCode(code, shopDomain, apiToken, apiVersion) {
   try {
-    let pageInfo = { hasNextPage: true, nextPageUrl: null };
-    let allPriceRules = [];
-    
-    // Fetch all price rules with pagination
-    while (pageInfo.hasNextPage) {
-      const url = pageInfo.nextPageUrl || 
-        `https://${shopDomain}/admin/api/${apiVersion}/price_rules.json?limit=250`;
-      
-      const response = await fetch(url, {
+    // Get all price rules
+    const response = await fetch(
+      `https://${shopDomain}/admin/api/${apiVersion}/price_rules.json?limit=250`,
+      {
         headers: {
           'Content-Type': 'application/json',
           'X-Shopify-Access-Token': apiToken
         }
-      });
+      }
+    );
 
-      if (!response.ok) {
-        console.warn(`Failed to fetch price rules page: ${response.status}`);
-        break;
-      }
-
-      const data = await response.json();
-      const priceRules = data.price_rules || [];
-      allPriceRules = allPriceRules.concat(priceRules);
-      
-      // Check for pagination
-      const linkHeader = response.headers.get('Link');
-      if (linkHeader && linkHeader.includes('rel="next"')) {
-        const nextMatch = linkHeader.match(/<([^>]+)>;\s*rel="next"/);
-        pageInfo.nextPageUrl = nextMatch ? nextMatch[1] : null;
-        pageInfo.hasNextPage = !!pageInfo.nextPageUrl;
-      } else {
-        pageInfo.hasNextPage = false;
-      }
-      
-      // Add small delay to respect rate limits
-      if (pageInfo.hasNextPage) {
-        await new Promise(resolve => setTimeout(resolve, 200));
-      }
+    if (!response.ok) {
+      return null;
     }
-    
-    console.log(`Checking ${allPriceRules.length} price rules for discount code: ${code}`);
+
+    const data = await response.json();
     
     // Find price rule with matching discount code
-    for (const priceRule of allPriceRules) {
+    for (const priceRule of data.price_rules || []) {
       const codesResponse = await fetch(
         `https://${shopDomain}/admin/api/${apiVersion}/price_rules/${priceRule.id}/discount_codes.json`,
         {
@@ -1078,16 +890,12 @@ async function findExistingDiscountCode(code, shopDomain, apiToken, apiVersion) 
         const matchingCode = codesData.discount_codes?.find(dc => dc.code === code);
         
         if (matchingCode) {
-          console.log(`✅ Found existing discount code: ${code} in price rule ${priceRule.id}`);
+          console.log(`Found existing discount code: ${code} in price rule ${priceRule.id}`);
           return { ...matchingCode, price_rule_id: priceRule.id };
         }
       }
-      
-      // Add small delay between discount code checks to respect rate limits
-      await new Promise(resolve => setTimeout(resolve, 50));
     }
 
-    console.log(`No existing discount code found: ${code}`);
     return null;
   } catch (error) {
     console.error('Error finding existing discount code:', error);
@@ -1097,75 +905,44 @@ async function findExistingDiscountCode(code, shopDomain, apiToken, apiVersion) 
 
 /**
  * Find existing price rule by exact title match (to prevent duplicates)
- * Handles pagination to check ALL price rules (not just first 250)
- * Returns the first matching rule, but includes allMatches array if duplicates exist
+ * Returns the first matching rule, but logs if duplicates are found
  */
 async function findExistingPriceRuleByTitle(title, shopDomain, apiToken, apiVersion) {
   try {
-    let pageInfo = { hasNextPage: true, nextPageUrl: null };
-    let allPriceRules = [];
-    
-    // Fetch all price rules with pagination
-    while (pageInfo.hasNextPage) {
-      const url = pageInfo.nextPageUrl || 
-        `https://${shopDomain}/admin/api/${apiVersion}/price_rules.json?limit=250`;
-      
-      const response = await fetch(url, {
+    const response = await fetch(
+      `https://${shopDomain}/admin/api/${apiVersion}/price_rules.json?limit=250`,
+      {
         headers: {
           'Content-Type': 'application/json',
           'X-Shopify-Access-Token': apiToken
         }
-      });
+      }
+    );
 
-      if (!response.ok) {
-        console.warn(`Failed to fetch price rules page: ${response.status}`);
-        break;
-      }
-
-      const data = await response.json();
-      const priceRules = data.price_rules || [];
-      allPriceRules = allPriceRules.concat(priceRules);
-      
-      // Check for pagination
-      const linkHeader = response.headers.get('Link');
-      if (linkHeader && linkHeader.includes('rel="next"')) {
-        const nextMatch = linkHeader.match(/<([^>]+)>;\s*rel="next"/);
-        pageInfo.nextPageUrl = nextMatch ? nextMatch[1] : null;
-        pageInfo.hasNextPage = !!pageInfo.nextPageUrl;
-      } else {
-        pageInfo.hasNextPage = false;
-      }
-      
-      // Add small delay to respect rate limits
-      if (pageInfo.hasNextPage) {
-        await new Promise(resolve => setTimeout(resolve, 200));
-      }
+    if (!response.ok) {
+      return null;
     }
-    
-    console.log(`Checking ${allPriceRules.length} price rules for title: "${title}"`);
+
+    const data = await response.json();
     
     // Find ALL price rules with exact title match (to detect duplicates)
-    const matchingRules = allPriceRules.filter(pr => pr.title === title);
+    const matchingRules = data.price_rules?.filter(pr => pr.title === title) || [];
     
     if (matchingRules.length === 0) {
-      console.log(`No existing price rule found with title: "${title}"`);
       return null;
     }
     
-    // If multiple matches found, log warning and include all matches
+    // If multiple matches found, log warning and prefer the first one
     if (matchingRules.length > 1) {
       console.warn(`⚠️ WARNING: Found ${matchingRules.length} duplicate price rules with title: "${title}"`);
       console.warn(`⚠️ Price rule IDs: ${matchingRules.map(r => r.id).join(', ')}`);
+      console.warn(`⚠️ The function will update the first one (ID: ${matchingRules[0].id})`);
+      console.warn(`⚠️ Please manually delete the duplicate(s) from Shopify Admin`);
     }
     
-    // Return the first matching rule, but include allMatches array for duplicate handling
-    const result = { ...matchingRules[0] };
-    if (matchingRules.length > 1) {
-      result.allMatches = matchingRules;
-    }
-    
-    console.log(`✅ Found existing price rule by title: "${title}" (ID: ${result.id})`);
-    return result;
+    // Return the first matching rule
+    console.log(`Found existing price rule by title: ${title} (ID: ${matchingRules[0].id})`);
+    return matchingRules[0];
   } catch (error) {
     console.error('Error finding existing price rule by title:', error);
     return null;
@@ -1173,7 +950,7 @@ async function findExistingPriceRuleByTitle(title, shopDomain, apiToken, apiVers
 }
 
 /**
- * Get discount code for a specific price rule (by code)
+ * Get discount code for a specific price rule
  */
 async function getDiscountCodeForPriceRule(priceRuleId, code, shopDomain, apiToken, apiVersion) {
   try {
@@ -1200,102 +977,16 @@ async function getDiscountCodeForPriceRule(priceRuleId, code, shopDomain, apiTok
 }
 
 /**
- * Get all discount codes for a price rule
- * Used to check if a price rule has any discount codes at all
- */
-async function getAllDiscountCodesForPriceRule(priceRuleId, shopDomain, apiToken, apiVersion) {
-  try {
-    const response = await fetch(
-      `https://${shopDomain}/admin/api/${apiVersion}/price_rules/${priceRuleId}/discount_codes.json`,
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Shopify-Access-Token': apiToken
-        }
-      }
-    );
-
-    if (!response.ok) {
-      return [];
-    }
-
-    const data = await response.json();
-    return data.discount_codes || [];
-  } catch (error) {
-    console.error('Error getting all discount codes for price rule:', error);
-    return [];
-  }
-}
-
-/**
- * Delete a price rule (and its discount codes)
- */
-async function deletePriceRule(priceRuleId, shopDomain, apiToken, apiVersion) {
-  try {
-    // Add delay before deleting (rate limit: 2 calls/second)
-    console.log('Waiting 1000ms before deleting price rule to respect rate limits...');
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    
-    const response = await fetch(
-      `https://${shopDomain}/admin/api/${apiVersion}/price_rules/${priceRuleId}.json`,
-      {
-        method: 'DELETE',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Shopify-Access-Token': apiToken
-        }
-      }
-    );
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      if (response.status === 429) {
-        throw new Error(`Rate limited: Too many API requests. Please wait and try again. Error: ${JSON.stringify(errorData)}`);
-      }
-      throw new Error(`Failed to delete price rule: ${response.statusText} - ${JSON.stringify(errorData)}`);
-    }
-
-    console.log(`✅ Deleted price rule ${priceRuleId}`);
-    return true;
-  } catch (error) {
-    console.error(`Error deleting price rule ${priceRuleId}:`, error);
-    throw error;
-  }
-}
-
-/**
  * Create discount code for an existing price rule
  */
 async function createDiscountCodeForPriceRule(priceRuleId, code, shopDomain, apiToken, apiVersion) {
   try {
-    // Helper to fetch with retry for rate limiting (2 calls per second limit)
-    async function fetchWithRetry(url, options, maxRetries = 3) {
-      for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        const response = await fetch(url, options);
-        
-        if (response.status === 429) {
-          const retryAfter = response.headers.get('Retry-After') || Math.pow(2, attempt);
-          console.warn(`Rate limited (429). Attempt ${attempt}/${maxRetries}. Retrying after ${retryAfter} seconds...`);
-          
-          if (attempt < maxRetries) {
-            await new Promise(resolve => setTimeout(resolve, retryAfter * 1000));
-            continue;
-          } else {
-            const errorText = await response.text();
-            throw new Error(`Rate limited: Too many API requests. Error: ${errorText}`);
-          }
-        }
-        
-        return response;
-      }
-    }
-    
     // Add delay before creating discount code (rate limit: 2 calls/second)
-    // Using 2000ms (2 seconds) to be extra safe and stay well under the limit
-    console.log('Waiting 2000ms before creating discount code to respect rate limits...');
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    // Using 1000ms to be safe and stay well under the limit
+    console.log('Waiting 1000ms before creating discount code to respect rate limits...');
+    await new Promise(resolve => setTimeout(resolve, 1000));
     
-    const response = await fetchWithRetry(
+    const response = await fetch(
       `https://${shopDomain}/admin/api/${apiVersion}/price_rules/${priceRuleId}/discount_codes.json`,
       {
         method: 'POST',
@@ -1313,9 +1004,6 @@ async function createDiscountCodeForPriceRule(priceRuleId, code, shopDomain, api
 
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
-      if (response.status === 429) {
-        throw new Error(`Rate limited: Too many API requests. Please wait and try again. Error: ${JSON.stringify(errorData)}`);
-      }
       throw new Error(`Failed to create discount code: ${response.statusText} - ${JSON.stringify(errorData)}`);
     }
 
@@ -1347,8 +1035,7 @@ async function createNewDiscountCode({
       const response = await fetch(url, options);
       
       if (response.status === 429) {
-        // Use longer retry delays: 3s, 6s, 12s for attempts 1, 2, 3
-        const retryAfter = response.headers.get('Retry-After') || (3 * Math.pow(2, attempt - 1));
+        const retryAfter = response.headers.get('Retry-After') || Math.pow(2, attempt);
         console.warn(`Rate limited (429). Attempt ${attempt}/${maxRetries}. Retrying after ${retryAfter} seconds...`);
         
         if (attempt < maxRetries) {
@@ -1365,9 +1052,9 @@ async function createNewDiscountCode({
   }
 
   // Add delay before creating price rule (rate limit: 2 calls/second = 500ms minimum between calls)
-  // Using 2000ms (2 seconds) to be extra safe and stay well under the limit
-  console.log('Waiting 2000ms before creating price rule to respect rate limits...');
-  await new Promise(resolve => setTimeout(resolve, 2000));
+  // Using 1000ms (1 second) to be safe and stay well under the limit
+  console.log('Waiting 1000ms before creating price rule to respect rate limits...');
+  await new Promise(resolve => setTimeout(resolve, 1000));
   
   // Convert cents to dollars for API (Shopify expects dollars, not cents)
   const discountAmountDollars = (discountAmountCents / 100).toFixed(2);
@@ -1444,13 +1131,12 @@ async function createNewDiscountCode({
   }
 
   // Add delay before creating discount code (rate limit: 2 calls/second)
-  // Using 2000ms (2 seconds) to be extra safe and stay well under the limit
-  // This ensures we wait after price rule creation before creating the code
-  console.log('Waiting 2000ms before creating discount code to respect rate limits...');
-  await new Promise(resolve => setTimeout(resolve, 2000));
+  // Using 1000ms to be safe and stay well under the limit
+  console.log('Waiting 1000ms before creating discount code to respect rate limits...');
+  await new Promise(resolve => setTimeout(resolve, 1000));
   
-  // Create discount code with retry logic (rate limit: 2 calls/second)
-  const codeResponse = await fetchWithRetry(
+  // Create discount code
+  const codeResponse = await fetch(
     `https://${shopDomain}/admin/api/${apiVersion}/price_rules/${priceRuleId}/discount_codes.json`,
     {
       method: 'POST',
@@ -1468,21 +1154,11 @@ async function createNewDiscountCode({
 
   if (!codeResponse.ok) {
     const errorData = await codeResponse.json().catch(() => ({}));
-    if (codeResponse.status === 429) {
-      throw new Error(`Rate limited: Too many API requests. Please wait and try again. Error: ${JSON.stringify(errorData)}`);
-    }
     throw new Error(`Failed to create discount code: ${codeResponse.statusText} - ${JSON.stringify(errorData)}`);
   }
 
-  const codeData = await codeResponse.json();
-  const createdCode = codeData.discount_code;
-  
-  if (!createdCode || !createdCode.code) {
-    throw new Error(`Discount code creation succeeded but no code returned. Response: ${JSON.stringify(codeData)}`);
-  }
-  
-  console.log(`✅ Created discount code: ${createdCode.code} for price rule ${priceRuleId}`);
-  return createdCode.code;
+  console.log(`✅ Created discount code: ${code}`);
+  return code;
 }
 
 /**
