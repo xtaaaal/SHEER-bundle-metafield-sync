@@ -614,15 +614,28 @@ async function createOrUpdateDiscountCode({
       // Check if discount code already exists for this price rule
       const codeForRule = await getDiscountCodeForPriceRule(existingPriceRuleId, code, shopDomain, apiToken, apiVersion);
       if (!codeForRule) {
-        // Code doesn't exist, create it
-        console.log(`Creating discount code ${code} for existing price rule`);
-        await createDiscountCodeForPriceRule(existingPriceRuleId, code, shopDomain, apiToken, apiVersion);
+        // Code doesn't exist, check if price rule has ANY codes
+        const allCodes = await getAllDiscountCodesForPriceRule(existingPriceRuleId, shopDomain, apiToken, apiVersion);
+        if (allCodes.length === 0) {
+          // Price rule has no codes at all - this is the orphaned price rule scenario
+          console.log(`⚠️ Found price rule ${existingPriceRuleId} with no discount codes. Adding code ${code}...`);
+        } else {
+          // Price rule has other codes, but not this one
+          console.log(`Price rule ${existingPriceRuleId} has ${allCodes.length} code(s) but not ${code}. Adding code...`);
+        }
+        // Create the code
+        try {
+          await createDiscountCodeForPriceRule(existingPriceRuleId, code, shopDomain, apiToken, apiVersion);
+        } catch (error) {
+          console.error(`⚠️ Failed to create discount code ${code} for price rule ${existingPriceRuleId}:`, error.message);
+          console.error(`⚠️ This may be due to rate limiting. The code will be added on the next webhook run.`);
+        }
       }
     }
   } else {
     // Create new price rule and discount code
     console.log(`Creating new discount code: ${code}`);
-    await createNewDiscountCode({
+    const result = await createNewDiscountCode({
       code,
       collectionTitle,
       collectionId, // Pass collection ID
@@ -632,6 +645,12 @@ async function createOrUpdateDiscountCode({
       apiToken,
       apiVersion
     });
+    
+    // If discount code creation failed (returned null), the price rule was created but has no code
+    // On the next webhook run, it will be found by title and the code will be added
+    if (result === null) {
+      console.warn(`⚠️ Price rule created but discount code creation failed. Code will be added on next webhook run.`);
+    }
   }
 }
 
@@ -757,6 +776,33 @@ async function getDiscountCodeForPriceRule(priceRuleId, code, shopDomain, apiTok
   } catch (error) {
     console.error('Error getting discount code for price rule:', error);
     return null;
+  }
+}
+
+/**
+ * Get all discount codes for a specific price rule
+ */
+async function getAllDiscountCodesForPriceRule(priceRuleId, shopDomain, apiToken, apiVersion) {
+  try {
+    const response = await fetch(
+      `https://${shopDomain}/admin/api/${apiVersion}/price_rules/${priceRuleId}/discount_codes.json`,
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': apiToken
+        }
+      }
+    );
+
+    if (!response.ok) {
+      return [];
+    }
+
+    const data = await response.json();
+    return data.discount_codes || [];
+  } catch (error) {
+    console.error('Error getting all discount codes for price rule:', error);
+    return [];
   }
 }
 
@@ -919,26 +965,42 @@ async function createNewDiscountCode({
   console.log('Waiting 1000ms before creating discount code to respect rate limits...');
   await new Promise(resolve => setTimeout(resolve, 1000));
   
-  // Create discount code
-  const codeResponse = await fetch(
-    `https://${shopDomain}/admin/api/${apiVersion}/price_rules/${priceRuleId}/discount_codes.json`,
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Shopify-Access-Token': apiToken
-      },
-      body: JSON.stringify({
-        discount_code: {
-          code: code
-        }
-      })
-    }
-  );
+  // Create discount code with retry logic
+  let codeResponse;
+  try {
+    codeResponse = await fetchWithRetry(
+      `https://${shopDomain}/admin/api/${apiVersion}/price_rules/${priceRuleId}/discount_codes.json`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': apiToken
+        },
+        body: JSON.stringify({
+          discount_code: {
+            code: code
+          }
+        })
+      }
+    );
+  } catch (error) {
+    // If discount code creation fails, log warning but don't throw
+    // The price rule exists, and we can try to add the code later
+    console.error(`⚠️ Failed to create discount code ${code} for price rule ${priceRuleId}:`, error.message);
+    console.error(`⚠️ Price rule ${priceRuleId} exists but has no discount code.`);
+    console.error(`⚠️ The function will try to add the code on the next webhook run.`);
+    // Don't throw - allow the function to complete
+    // The price rule exists, just without a code (will be fixed on next run)
+    return null;
+  }
 
   if (!codeResponse.ok) {
     const errorData = await codeResponse.json().catch(() => ({}));
-    throw new Error(`Failed to create discount code: ${codeResponse.statusText} - ${JSON.stringify(errorData)}`);
+    console.error(`⚠️ Failed to create discount code ${code} for price rule ${priceRuleId}:`, errorData);
+    console.error(`⚠️ Price rule ${priceRuleId} exists but has no discount code.`);
+    console.error(`⚠️ The function will try to add the code on the next webhook run.`);
+    // Don't throw - allow the function to complete
+    return null;
   }
 
   console.log(`✅ Created discount code: ${code}`);
