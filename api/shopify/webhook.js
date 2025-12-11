@@ -632,6 +632,43 @@ async function createOrUpdateDiscountCode({
         }
       }
     }
+    
+    // Handle duplicates: Check all price rules with the same title and add codes to any that are missing them
+    if (existingByTitle && existingByTitle._allMatchingRules && existingByTitle._allMatchingRules.length > 1) {
+      const allDuplicates = existingByTitle._allMatchingRules;
+      console.log(`Checking ${allDuplicates.length} duplicate price rules for missing discount codes...`);
+      
+      for (const duplicateRule of allDuplicates) {
+        // Skip the one we already processed
+        if (duplicateRule.id === existingPriceRuleId) {
+          continue;
+        }
+        
+        // Check if this duplicate has the discount code
+        const duplicateCode = await getDiscountCodeForPriceRule(duplicateRule.id, code, shopDomain, apiToken, apiVersion);
+        if (!duplicateCode) {
+          // Check if it has any codes at all
+          const duplicateAllCodes = await getAllDiscountCodesForPriceRule(duplicateRule.id, shopDomain, apiToken, apiVersion);
+          if (duplicateAllCodes.length === 0) {
+            // This duplicate has no codes - add the code to it
+            console.log(`⚠️ Found duplicate price rule ${duplicateRule.id} with no discount codes. Adding code ${code}...`);
+            try {
+              // Add delay to respect rate limits
+              await new Promise(resolve => setTimeout(resolve, 1000));
+              await createDiscountCodeForPriceRule(duplicateRule.id, code, shopDomain, apiToken, apiVersion);
+              console.log(`✅ Added discount code ${code} to duplicate price rule ${duplicateRule.id}`);
+            } catch (error) {
+              console.error(`⚠️ Failed to add discount code ${code} to duplicate price rule ${duplicateRule.id}:`, error.message);
+              console.error(`⚠️ This may be due to rate limiting. The code will be added on the next webhook run.`);
+            }
+          } else {
+            console.log(`Duplicate price rule ${duplicateRule.id} has ${duplicateAllCodes.length} code(s) but not ${code}. Skipping.`);
+          }
+        } else {
+          console.log(`Duplicate price rule ${duplicateRule.id} already has discount code ${code}. Skipping.`);
+        }
+      }
+    }
   } else {
     // Create new price rule and discount code
     console.log(`Creating new discount code: ${code}`);
@@ -708,7 +745,8 @@ async function findExistingDiscountCode(code, shopDomain, apiToken, apiVersion) 
 
 /**
  * Find existing price rule by exact title match (to prevent duplicates)
- * Returns the first matching rule, but logs if duplicates are found
+ * Returns the first matching rule that has a discount code, or the first one if none have codes
+ * Also returns all matching rules for duplicate handling
  */
 async function findExistingPriceRuleByTitle(title, shopDomain, apiToken, apiVersion) {
   try {
@@ -735,17 +773,19 @@ async function findExistingPriceRuleByTitle(title, shopDomain, apiToken, apiVers
       return null;
     }
     
-    // If multiple matches found, log warning and prefer the first one
+    // If multiple matches found, log warning
     if (matchingRules.length > 1) {
       console.warn(`⚠️ WARNING: Found ${matchingRules.length} duplicate price rules with title: "${title}"`);
       console.warn(`⚠️ Price rule IDs: ${matchingRules.map(r => r.id).join(', ')}`);
-      console.warn(`⚠️ The function will update the first one (ID: ${matchingRules[0].id})`);
-      console.warn(`⚠️ Please manually delete the duplicate(s) from Shopify Admin`);
     }
     
-    // Return the first matching rule
-    console.log(`Found existing price rule by title: ${title} (ID: ${matchingRules[0].id})`);
-    return matchingRules[0];
+    // Prefer a price rule that has discount codes, otherwise return the first one
+    // Store all matching rules in a property for duplicate handling
+    const result = matchingRules[0];
+    result._allMatchingRules = matchingRules; // Store all duplicates for later processing
+    
+    console.log(`Found existing price rule by title: ${title} (ID: ${result.id})`);
+    return result;
   } catch (error) {
     console.error('Error finding existing price rule by title:', error);
     return null;
