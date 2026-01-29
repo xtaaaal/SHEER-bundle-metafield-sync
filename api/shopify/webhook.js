@@ -993,6 +993,17 @@ async function createNewDiscountCode({
   console.log(`✅ Price rule created: ${priceRuleId}`);
   console.log(`ℹ️ Note: combines_with must be set manually in Shopify Admin`);
 
+  async function cleanupOrphanedPriceRule(reason) {
+    console.warn(`⚠️ Removing orphaned price rule ${priceRuleId}: ${reason}`);
+    try {
+      // Add delay to respect rate limits
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      await deletePriceRule(priceRuleId, shopDomain, apiToken, apiVersion);
+    } catch (cleanupError) {
+      console.error(`⚠️ Failed to delete orphaned price rule ${priceRuleId}:`, cleanupError.message);
+    }
+  }
+
   // Add delay before creating discount code (rate limit: 2 calls/second)
   // Using 1000ms to be safe and stay well under the limit
   console.log('Waiting 1000ms before creating discount code to respect rate limits...');
@@ -1021,9 +1032,9 @@ async function createNewDiscountCode({
     // The price rule exists, and we can try to add the code later
     console.error(`⚠️ Failed to create discount code ${code} for price rule ${priceRuleId}:`, error.message);
     console.error(`⚠️ Price rule ${priceRuleId} exists but has no discount code.`);
-    console.error(`⚠️ The function will try to add the code on the next webhook run.`);
+    console.error(`⚠️ The function will delete the orphaned price rule to avoid leftovers.`);
+    await cleanupOrphanedPriceRule(error.message);
     // Don't throw - allow the function to complete
-    // The price rule exists, just without a code (will be fixed on next run)
     return null;
   }
 
@@ -1031,7 +1042,8 @@ async function createNewDiscountCode({
     const errorData = await codeResponse.json().catch(() => ({}));
     console.error(`⚠️ Failed to create discount code ${code} for price rule ${priceRuleId}:`, errorData);
     console.error(`⚠️ Price rule ${priceRuleId} exists but has no discount code.`);
-    console.error(`⚠️ The function will try to add the code on the next webhook run.`);
+    console.error(`⚠️ The function will delete the orphaned price rule to avoid leftovers.`);
+    await cleanupOrphanedPriceRule(JSON.stringify(errorData));
     // Don't throw - allow the function to complete
     return null;
   }
