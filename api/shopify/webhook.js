@@ -477,7 +477,9 @@ async function processBundleDiscountCodes(collectionId, webhookData = {}) {
 
   // Process each bundle tier
   // Add delay between each tier to respect rate limits (2 calls per second for price rules)
-  // IMPORTANT: Need at least 1000ms (1 second) between price rule API calls to stay under 2/second limit
+  // IMPORTANT: Need longer delays between tier processing because each tier makes multiple API calls
+  // Each tier can make 2-4 API calls (check existing, create/update price rule, create discount code)
+  // With 2 calls/second limit, we need at least 2-3 seconds between tiers
   for (let i = 0; i < bundleTiers.length; i++) {
     const tier = bundleTiers[i];
     
@@ -487,15 +489,15 @@ async function processBundleDiscountCodes(collectionId, webhookData = {}) {
     }
 
     try {
-      // Add delay before processing each tier (including first one after GraphQL query)
-      // 1000ms delay = exactly 1 call per second (safely under 2 calls/second limit)
+      // Add longer delay before processing each tier
+      // 3000ms (3 seconds) ensures we stay well under rate limit even with multiple API calls per tier
       if (i > 0) {
-        console.log(`Waiting 1000ms before processing tier ${tier.quantity}...`);
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        console.log(`Waiting 3000ms before processing tier ${tier.quantity}...`);
+        await new Promise(resolve => setTimeout(resolve, 3000));
       } else {
         // Add delay even for first tier to ensure rate limit is respected after GraphQL query
-        console.log(`Waiting 1000ms before processing first tier ${tier.quantity}...`);
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        console.log(`Waiting 2000ms before processing first tier ${tier.quantity}...`);
+        await new Promise(resolve => setTimeout(resolve, 2000));
       }
       
       await createOrUpdateDiscountCode({
@@ -513,10 +515,10 @@ async function processBundleDiscountCodes(collectionId, webhookData = {}) {
     } catch (error) {
       console.error(`Error creating discount for tier ${tier.quantity}:`, error);
       // Continue with other tiers even if one fails
-      // Add delay even on error to respect rate limits
+      // Add longer delay even on error to allow rate limit to recover
       if (i < bundleTiers.length - 1) {
-        console.log(`Waiting 1000ms after error before processing next tier...`);
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        console.log(`Waiting 5000ms after error before processing next tier (allowing rate limit recovery)...`);
+        await new Promise(resolve => setTimeout(resolve, 5000));
       }
     }
   }
@@ -868,9 +870,9 @@ async function getAllDiscountCodesForPriceRule(priceRuleId, shopDomain, apiToken
 async function createDiscountCodeForPriceRule(priceRuleId, code, shopDomain, apiToken, apiVersion) {
   try {
     // Add delay before creating discount code (rate limit: 2 calls/second)
-    // Using 1000ms to be safe and stay well under the limit
-    console.log('Waiting 1000ms before creating discount code to respect rate limits...');
-    await new Promise(resolve => setTimeout(resolve, 1000));
+    // Using 1500ms to be safe and stay well under the limit
+    console.log('Waiting 1500ms before creating discount code to respect rate limits...');
+    await new Promise(resolve => setTimeout(resolve, 1500));
     
     const response = await fetch(
       `https://${shopDomain}/admin/api/${apiVersion}/price_rules/${priceRuleId}/discount_codes.json`,
@@ -916,12 +918,14 @@ async function createNewDiscountCode({
   apiVersion
 }) {
   // Helper to fetch with retry for rate limiting (2 calls per second limit)
-  async function fetchWithRetry(url, options, maxRetries = 3) {
+  // Uses longer delays: 3, 6, 12, 24, 48 seconds for exponential backoff
+  async function fetchWithRetry(url, options, maxRetries = 5) {
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       const response = await fetch(url, options);
       
       if (response.status === 429) {
-        const retryAfter = response.headers.get('Retry-After') || Math.pow(2, attempt);
+        // Use longer delays: 3, 6, 12, 24, 48 seconds
+        const retryAfter = response.headers.get('Retry-After') || (3 * Math.pow(2, attempt - 1));
         console.warn(`Rate limited (429). Attempt ${attempt}/${maxRetries}. Retrying after ${retryAfter} seconds...`);
         
         if (attempt < maxRetries) {
@@ -929,7 +933,7 @@ async function createNewDiscountCode({
           continue;
         } else {
           const errorText = await response.text();
-          throw new Error(`Rate limited: Too many API requests. Error: ${errorText}`);
+          throw new Error(`Rate limited after ${maxRetries} attempts: ${errorText}`);
         }
       }
       
@@ -937,10 +941,10 @@ async function createNewDiscountCode({
     }
   }
 
-  // Add delay before creating price rule (rate limit: 2 calls/second = 500ms minimum between calls)
-  // Using 1000ms (1 second) to be safe and stay well under the limit
-  console.log('Waiting 1000ms before creating price rule to respect rate limits...');
-  await new Promise(resolve => setTimeout(resolve, 1000));
+  // Add delay before creating price rule (rate limit: 2 calls/second)
+  // Using 1500ms to be safe and stay well under the limit
+  console.log('Waiting 1500ms before creating price rule to respect rate limits...');
+  await new Promise(resolve => setTimeout(resolve, 1500));
   
   // Convert cents to dollars for API (Shopify expects dollars, not cents)
   const discountAmountDollars = (discountAmountCents / 100).toFixed(2);
@@ -1005,9 +1009,9 @@ async function createNewDiscountCode({
   }
 
   // Add delay before creating discount code (rate limit: 2 calls/second)
-  // Using 1000ms to be safe and stay well under the limit
-  console.log('Waiting 1000ms before creating discount code to respect rate limits...');
-  await new Promise(resolve => setTimeout(resolve, 1000));
+  // Using 1500ms to be safe and stay well under the limit
+  console.log('Waiting 1500ms before creating discount code to respect rate limits...');
+  await new Promise(resolve => setTimeout(resolve, 1500));
   
   // Create discount code with retry logic
   let codeResponse;
@@ -1059,11 +1063,38 @@ async function updatePriceRule(priceRuleId, discountAmountCents, collectionId, s
   const discountAmountDollars = (discountAmountCents / 100).toFixed(2);
   console.log(`Updating price rule ${priceRuleId} with discount: $${discountAmountDollars} (${discountAmountCents} cents)`);
   
+  // Helper function for retrying rate-limited requests
+  async function fetchWithRetry(url, options, maxRetries = 5) {
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      const response = await fetch(url, options);
+      
+      if (response.status === 429) {
+        // Use longer delays: 3, 6, 12, 24, 48 seconds
+        const retryAfter = response.headers.get('Retry-After') || (3 * Math.pow(2, attempt - 1));
+        console.warn(`Rate limited (429). Attempt ${attempt}/${maxRetries}. Retrying after ${retryAfter} seconds...`);
+        
+        if (attempt < maxRetries) {
+          await new Promise(resolve => setTimeout(resolve, retryAfter * 1000));
+          continue;
+        } else {
+          const errorText = await response.text();
+          throw new Error(`Rate limited after ${maxRetries} attempts: ${errorText}`);
+        }
+      }
+      
+      return response;
+    }
+  }
+  
+  // Add delay before fetching existing rule (rate limit protection)
+  console.log('Waiting 1500ms before fetching existing price rule...');
+  await new Promise(resolve => setTimeout(resolve, 1500));
+  
   // First, fetch the existing price rule to preserve all existing fields
   // This ensures we don't accidentally reset other settings
   let existingRule = null;
   try {
-    const getResponse = await fetch(
+    const getResponse = await fetchWithRetry(
       `https://${shopDomain}/admin/api/${apiVersion}/price_rules/${priceRuleId}.json`,
       {
         method: 'GET',
@@ -1110,8 +1141,12 @@ async function updatePriceRule(priceRuleId, discountAmountCents, collectionId, s
   
   console.log('Updating price rule:', JSON.stringify(updatePayload, null, 2));
   
-  // Update discount amount and collection targeting
-  const response = await fetch(
+  // Add delay before updating price rule (rate limit protection)
+  console.log('Waiting 1500ms before updating price rule...');
+  await new Promise(resolve => setTimeout(resolve, 1500));
+  
+  // Update discount amount and collection targeting with retry logic
+  const response = await fetchWithRetry(
     `https://${shopDomain}/admin/api/${apiVersion}/price_rules/${priceRuleId}.json`,
     {
       method: 'PUT',
