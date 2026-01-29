@@ -435,6 +435,18 @@ async function processBundleDiscountCodes(collectionId, webhookData = {}) {
   // Check if bundle is enabled
   if (!bundleData.bundleEnabled) {
     console.log('Bundle not enabled for collection:', collectionTitle);
+    console.log('Checking for existing discount codes to delete...');
+    
+    // Delete existing discount codes when bundle is disabled
+    const bundleGroupId = bundleData.bundleGroupId || collectionHandle;
+    await deleteExistingBundleDiscounts({
+      bundleGroupId,
+      collectionTitle,
+      shopDomain,
+      apiToken,
+      apiVersion
+    });
+    
     return;
   }
 
@@ -521,6 +533,103 @@ async function processBundleDiscountCodes(collectionId, webhookData = {}) {
         await new Promise(resolve => setTimeout(resolve, 5000));
       }
     }
+  }
+}
+
+/**
+ * Delete existing bundle discount codes when bundle is disabled
+ */
+async function deleteExistingBundleDiscounts({
+  bundleGroupId,
+  collectionTitle,
+  shopDomain,
+  apiToken,
+  apiVersion
+}) {
+  // Format the bundle group ID to match existing discount codes
+  const bundleGroupIdFormatted = (bundleGroupId || '')
+    .toString()
+    .toUpperCase()
+    .replace(/[^A-Z0-9-]/g, '-')
+    .substring(0, 20);
+  
+  // Search pattern: BDL-*P-{bundleGroupId}*
+  const searchPrefix = `BDL-`;
+  
+  console.log(`Searching for discount codes starting with: ${searchPrefix} for bundle group: ${bundleGroupIdFormatted}`);
+  
+  try {
+    // Add delay before API call
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    
+    // Get all price rules that might match our bundle
+    const response = await fetch(
+      `https://${shopDomain}/admin/api/${apiVersion}/price_rules.json?limit=250`,
+      {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': apiToken
+        }
+      }
+    );
+    
+    if (!response.ok) {
+      console.warn('Failed to fetch price rules:', response.statusText);
+      return;
+    }
+    
+    const data = await response.json();
+    const priceRules = data.price_rules || [];
+    
+    // Filter price rules that match our bundle pattern
+    // Pattern: "Bundle Discount - {collectionTitle} - {X}-Pack"
+    const matchingRules = priceRules.filter(rule => {
+      const title = (rule.title || '').toLowerCase();
+      const collectionTitleLower = collectionTitle.toLowerCase();
+      return title.includes('bundle discount') && title.includes(collectionTitleLower);
+    });
+    
+    if (matchingRules.length === 0) {
+      console.log('No existing bundle discount codes found to delete');
+      return;
+    }
+    
+    console.log(`Found ${matchingRules.length} bundle discount(s) to delete for collection: ${collectionTitle}`);
+    
+    // Delete each matching price rule (this also deletes associated discount codes)
+    for (const rule of matchingRules) {
+      try {
+        console.log(`Deleting price rule: ${rule.id} (${rule.title})`);
+        
+        // Add delay before deletion
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        
+        const deleteResponse = await fetch(
+          `https://${shopDomain}/admin/api/${apiVersion}/price_rules/${rule.id}.json`,
+          {
+            method: 'DELETE',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Shopify-Access-Token': apiToken
+            }
+          }
+        );
+        
+        if (deleteResponse.ok) {
+          console.log(`✅ Deleted bundle discount: ${rule.title}`);
+        } else {
+          console.warn(`⚠️ Failed to delete price rule ${rule.id}:`, deleteResponse.statusText);
+        }
+      } catch (deleteError) {
+        console.warn(`⚠️ Error deleting price rule ${rule.id}:`, deleteError.message);
+      }
+    }
+    
+    console.log(`Finished cleaning up bundle discounts for collection: ${collectionTitle}`);
+  } catch (error) {
+    console.error('Error deleting existing bundle discounts:', error);
+    // Don't throw - just log the error and continue
   }
 }
 
